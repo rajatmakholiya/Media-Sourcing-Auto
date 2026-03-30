@@ -3,7 +3,7 @@ FROM node:20-slim AS deps
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci
 
 # ── Stage 2: Build ─────────────────────────────────────────
 FROM node:20-slim AS builder
@@ -62,7 +62,7 @@ COPY --from=builder /app/src/remotion ./src/remotion
 COPY --from=builder /app/src/lib ./src/lib
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
-# Copy Remotion dependencies and their transitive deps (needed by render.mjs)
+# Copy all node_modules (needed by render.mjs for Remotion bundling)
 COPY --from=deps /app/node_modules ./node_modules
 
 # Create tmp directories for exports
