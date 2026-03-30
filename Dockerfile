@@ -1,13 +1,9 @@
-# ── Stage 1: Dependencies ──────────────────────────────────
-FROM node:20-slim AS deps
-WORKDIR /app
-
-COPY package.json package-lock.json ./
-RUN npm ci
-
-# ── Stage 2: Build ─────────────────────────────────────────
+# ── Stage 1: Build ─────────────────────────────────────────
 FROM node:20-slim AS builder
 WORKDIR /app
+
+# Install build tools for native modules (lightningcss etc)
+RUN apt-get update && apt-get install -y --no-install-recommends python3 make g++ && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -17,7 +13,7 @@ COPY . .
 # Build Next.js in standalone mode
 RUN npm run build
 
-# ── Stage 3: Production ───────────────────────────────────
+# ── Stage 2: Production ───────────────────────────────────
 FROM node:20-slim AS runner
 WORKDIR /app
 
@@ -62,8 +58,8 @@ COPY --from=builder /app/src/remotion ./src/remotion
 COPY --from=builder /app/src/lib ./src/lib
 COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
-# Copy all node_modules (needed by render.mjs for Remotion bundling)
-COPY --from=deps /app/node_modules ./node_modules
+# Copy node_modules from builder (has correct Linux binaries)
+COPY --from=builder /app/node_modules ./node_modules
 
 # Create tmp directories for exports
 RUN mkdir -p tmp/exports tmp/outputs && chown -R nextjs:nodejs tmp
