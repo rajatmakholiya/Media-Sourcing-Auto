@@ -245,44 +245,93 @@ function demoImages(query: string, count: number): MediaResult[] {
   }));
 }
 
+// ============================================
+// SERPER — Google Videos (for video mode)
+// ============================================
+async function googleVideos(query: string, count: number): Promise<MediaResult[]> {
+  const key = process.env.SERPER_API_KEY;
+  if (!key) return [];
+  try {
+    const res = await fetch("https://google.serper.dev/videos", {
+      method: "POST",
+      headers: { "X-API-KEY": key, "Content-Type": "application/json" },
+      body: JSON.stringify({ q: query, num: count * 3 }),
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const results: MediaResult[] = [];
+    for (const vid of data.videos || []) {
+      if (vid.link && !isBlockedDomain(vid.link)) {
+        results.push({
+          id: `google-vid-${results.length}-${Date.now()}`,
+          type: "image", // keep type as image for unified handling in UI
+          thumbnail: vid.thumbnailUrl || vid.imageUrl || "",
+          preview_url: vid.link,
+          full_url: vid.link,
+          source: "Google Video",
+          author: vid.channel || vid.source || "Web",
+          width: 1920, height: 1080,
+          title: vid.title,
+          page_url: vid.link,
+        });
+      }
+      if (results.length >= count) break;
+    }
+    return results;
+  } catch { return []; }
+}
+
 export async function POST(req: NextRequest) {
   try {
-    const { query, slide_id } = await req.json();
+    const { query, video_query, slide_id, mode } = await req.json();
     if (!query) return NextResponse.json({ error: "Query required" }, { status: 400 });
 
+    const isVideoMode = mode === "video";
     const hasSerper = !!process.env.SERPER_API_KEY;
     const hasFirecrawl = !!process.env.FIRECRAWL_API_KEY;
 
     if (!hasSerper && !hasFirecrawl) {
-      return NextResponse.json({ slide_id, images: demoImages(query, 14), is_demo: true });
+      return NextResponse.json({ slide_id, images: demoImages(query, 14), videos: [], is_demo: true });
     }
 
-    const searches: Promise<MediaResult[]>[] = [];
+    const imageSearches: Promise<MediaResult[]>[] = [];
+    const videoSearches: Promise<MediaResult[]>[] = [];
     const sources: string[] = [];
 
     // Imagn/Imago first (priority) — 5 each
     if (hasFirecrawl) {
-      searches.push(imagnImages(query, 5));
-      searches.push(imagoImages(query, 5));
+      imageSearches.push(imagnImages(query, 5));
+      imageSearches.push(imagoImages(query, 5));
       sources.push("Imagn", "Imago");
     }
 
-    // Google — 5 images
+    // Google Images — 5
     if (hasSerper) {
-      searches.push(googleImages(query, 5));
-      // Alt query for variety
-      searches.push(googleImages(`${query} latest`, 3));
+      imageSearches.push(googleImages(query, 5));
+      imageSearches.push(googleImages(`${query} latest`, 3));
       sources.push("Google");
     }
 
-    const results = (await Promise.all(searches)).flat();
-    const unique = deduplicateResults(results).slice(0, 15);
+    // Video search (only in video mode)
+    if (isVideoMode && hasSerper && video_query) {
+      videoSearches.push(googleVideos(video_query, 5));
+      videoSearches.push(googleVideos(`${video_query} highlights`, 3));
+      sources.push("Google Video");
+    }
+
+    const [imageResults, videoResults] = await Promise.all([
+      Promise.all(imageSearches).then((r) => r.flat()),
+      videoSearches.length > 0 ? Promise.all(videoSearches).then((r) => r.flat()) : Promise.resolve([]),
+    ]);
+
+    const uniqueImages = deduplicateResults(imageResults).slice(0, 15);
+    const uniqueVideos = deduplicateResults(videoResults).slice(0, 8);
 
     // Sort: Imagn first, then Imago, then Google
-    const sourceOrder = { Imagn: 0, Imago: 1, Google: 2, Demo: 3 };
-    unique.sort((a, b) => (sourceOrder[a.source as keyof typeof sourceOrder] ?? 9) - (sourceOrder[b.source as keyof typeof sourceOrder] ?? 9));
+    const sourceOrder: Record<string, number> = { Imagn: 0, Imago: 1, Google: 2, "Google Video": 3, Demo: 4 };
+    uniqueImages.sort((a, b) => (sourceOrder[a.source] ?? 9) - (sourceOrder[b.source] ?? 9));
 
-    return NextResponse.json({ slide_id, images: unique, sources, is_demo: false });
+    return NextResponse.json({ slide_id, images: uniqueImages, videos: uniqueVideos, sources, is_demo: false });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : "Search failed" }, { status: 500 });
   }

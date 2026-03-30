@@ -6,14 +6,18 @@ import Link from "next/link";
 import { Card, Button, Badge, Spinner, Textarea } from "@/components/ui";
 import {
   Search, Check, X, Upload, Link as LinkIcon, ChevronDown, ChevronUp,
-  RefreshCw, Download, ArrowLeft, Image as ImageIcon, FileText, Pencil,
+  RefreshCw, Download, ArrowLeft, Image as ImageIcon, FileText, Pencil, Film,
 } from "lucide-react";
+
+type SourcingMode = "slideshow" | "video";
 
 type Slide = {
   id: number;
   text: string;
   image_query: string;
+  video_query?: string;
   subject: string;
+  estimated_duration_sec?: number;
 };
 
 type MediaResult = {
@@ -33,7 +37,9 @@ type MediaResult = {
 type SlideMedia = {
   slide_id: number;
   images: MediaResult[];
+  videos: MediaResult[];
   selected: MediaResult | null;
+  selectedVideo: MediaResult | null;
   custom: { url: string; name: string } | null;
   loading: boolean;
   searched: boolean;
@@ -55,6 +61,7 @@ Heinrich Haarberg (TE): The standout of the day, the former quarterback turned t
 
 export default function MediaSourcingPage() {
   const [script, setScript] = useState("");
+  const [sourcingMode, setSourcingMode] = useState<SourcingMode>("slideshow");
   const [phase, setPhase] = useState<Phase>("input");
   const [slides, setSlides] = useState<Slide[]>([]);
   const [analysis, setAnalysis] = useState<Record<string, unknown> | null>(null);
@@ -68,6 +75,7 @@ export default function MediaSourcingPage() {
   const wordCount = script.trim() ? script.trim().split(/\s+/).length : 0;
   const selectedCount = slideMedia.filter((sm) => sm.selected || sm.custom).length;
   const allSelected = slides.length > 0 && selectedCount === slides.length;
+  const isVideoMode = sourcingMode === "video";
 
   // --- Process script ---
   const processScript = useCallback(async () => {
@@ -77,7 +85,7 @@ export default function MediaSourcingPage() {
       const resp = await fetch("/api/media-sourcing/segment", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ script, script_type: "MSN Slideshow" }),
+        body: JSON.stringify({ script, script_type: isVideoMode ? "MSN Video" : "MSN Slideshow" }),
       });
       if (!resp.ok) {
         const err = await resp.json().catch(() => ({}));
@@ -90,7 +98,9 @@ export default function MediaSourcingPage() {
         (data.slides || []).map((s: Slide) => ({
           slide_id: s.id,
           images: [],
+          videos: [],
           selected: null,
+          selectedVideo: null,
           custom: null,
           loading: false,
           searched: false,
@@ -122,7 +132,12 @@ export default function MediaSourcingPage() {
       const resp = await fetch("/api/media-sourcing/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: q, slide_id: slideId }),
+        body: JSON.stringify({
+          query: q,
+          video_query: slide?.video_query || q,
+          slide_id: slideId,
+          mode: isVideoMode ? "video" : "slideshow",
+        }),
       });
       if (!resp.ok) throw new Error("Search failed");
       const data = await resp.json();
@@ -130,7 +145,7 @@ export default function MediaSourcingPage() {
       setSlideMedia((prev) =>
         prev.map((sm) =>
           sm.slide_id === slideId
-            ? { ...sm, images: data.images || [], loading: false, searched: true }
+            ? { ...sm, images: data.images || [], videos: data.videos || [], loading: false, searched: true }
             : sm
         )
       );
@@ -139,7 +154,7 @@ export default function MediaSourcingPage() {
         prev.map((sm) => (sm.slide_id === slideId ? { ...sm, loading: false, searched: true } : sm))
       );
     }
-  }, [slides]);
+  }, [slides, isVideoMode]);
 
   const searchAll = useCallback(async () => {
     for (const slide of slides) {
@@ -188,6 +203,7 @@ export default function MediaSourcingPage() {
         slide_text: slide.text,
         subject: slide.subject,
         image_query: slide.image_query,
+        ...(isVideoMode ? { video_query: slide.video_query, estimated_duration_sec: slide.estimated_duration_sec } : {}),
         selected_media: sm?.selected
           ? { url: sm.selected.full_url, source: sm.selected.source, author: sm.selected.author, title: sm.selected.title }
           : sm?.custom
@@ -211,7 +227,9 @@ export default function MediaSourcingPage() {
     <div className="min-h-screen bg-gray-50">
       <nav className="bg-white border-b border-gray-200 px-6 py-3 flex items-center gap-4">
         <Link href="/" className="text-gray-400 hover:text-gray-600"><ArrowLeft size={18} /></Link>
-        <span className="font-bold text-base text-indigo-500">Media Sourcing Assistant</span>
+        <span className="font-bold text-base text-indigo-500">
+          {isVideoMode ? "MSN Video Sourcing" : "MSN SS Sourcing"}
+        </span>
         {phase === "selection" && (
           <span className="ml-auto text-xs text-gray-500">
             {selectedCount}/{slides.length} slides selected
@@ -227,7 +245,7 @@ export default function MediaSourcingPage() {
             <div className="mb-6">
               <h1 className="text-xl font-semibold text-gray-900">Paste your article</h1>
               <p className="text-sm text-gray-500 mt-1">
-                The AI will identify slides and generate targeted search queries for Imagn, Imago, and Google Images.
+                The AI will identify {isVideoMode ? "video segments" : "slides"} and generate targeted search queries for {isVideoMode ? "images and video footage" : "Imagn, Imago, and Google Images"}.
               </p>
             </div>
 
@@ -238,11 +256,54 @@ export default function MediaSourcingPage() {
             )}
 
             <Card>
+              {/* Mode selector */}
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-600 mb-1.5">Sourcing type</label>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => setSourcingMode("slideshow")}
+                    className={`p-3 rounded-lg border text-left transition-colors ${
+                      sourcingMode === "slideshow"
+                        ? "border-indigo-300 bg-indigo-50"
+                        : "border-gray-200 hover:bg-gray-50"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <ImageIcon size={15} className={sourcingMode === "slideshow" ? "text-indigo-600" : "text-gray-400"} />
+                      <span className={`text-sm font-semibold ${sourcingMode === "slideshow" ? "text-indigo-700" : "text-gray-700"}`}>
+                        MSN SS Sourcing
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-gray-500 m-0">
+                      Slideshow articles — images only. Breaks into slides, searches Imagn/Imago/Google.
+                    </p>
+                  </button>
+                  <button
+                    onClick={() => setSourcingMode("video")}
+                    className={`p-3 rounded-lg border text-left transition-colors ${
+                      sourcingMode === "video"
+                        ? "border-indigo-300 bg-indigo-50"
+                        : "border-gray-200 hover:bg-gray-50"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <Film size={15} className={sourcingMode === "video" ? "text-indigo-600" : "text-gray-400"} />
+                      <span className={`text-sm font-semibold ${sourcingMode === "video" ? "text-indigo-700" : "text-gray-700"}`}>
+                        MSN Video Sourcing
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-gray-500 m-0">
+                      Video scripts — images + video footage. Broadcast pacing, dual search queries per segment.
+                    </p>
+                  </button>
+                </div>
+              </div>
+
               <label className="block text-sm font-medium text-gray-600 mb-1.5">Article / Script</label>
               <Textarea
                 value={script}
                 onChange={(e) => setScript(e.target.value)}
-                placeholder="Paste your MSN slideshow article text here..."
+                placeholder={isVideoMode ? "Paste your MSN video script here..." : "Paste your MSN slideshow article text here..."}
                 className="!min-h-[200px]"
               />
               <div className="flex items-center justify-between mt-3 flex-wrap gap-2">
@@ -254,7 +315,7 @@ export default function MediaSourcingPage() {
                   {script && <Button variant="secondary" onClick={() => setScript("")}>Clear</Button>}
                 </div>
                 <Button disabled={script.trim().length <= 10} onClick={processScript}>
-                  <FileText size={15} /> Process article
+                  <FileText size={15} /> Process {isVideoMode ? "script" : "article"}
                 </Button>
               </div>
             </Card>
@@ -339,9 +400,12 @@ export default function MediaSourcingPage() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-sm text-gray-900 m-0 line-clamp-2">{slide.text}</p>
-                      <div className="flex items-center gap-1.5 mt-1">
+                      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                         <Badge variant="keyword">{slide.image_query}</Badge>
                         {slide.subject && <Badge variant="info">{slide.subject}</Badge>}
+                        {isVideoMode && slide.estimated_duration_sec && (
+                          <Badge variant="duration">{slide.estimated_duration_sec}s</Badge>
+                        )}
                         {hasSelection && (
                           <Badge variant="success">{sm.selected?.source || "Custom"}</Badge>
                         )}
@@ -405,57 +469,104 @@ export default function MediaSourcingPage() {
                         </div>
                       )}
 
-                      {/* Results — grouped by source */}
+                      {/* Results */}
                       {!sm.loading && sm.searched && (
                         <>
-                          {sm.images.length === 0 ? (
-                            <div className="text-center py-6 text-sm text-gray-400">No images found. Try editing the search query.</div>
+                          {sm.images.length === 0 && sm.videos.length === 0 ? (
+                            <div className="text-center py-6 text-sm text-gray-400">No results found. Try editing the search query.</div>
                           ) : (
-                            <div className="mb-3">
-                              <div className="flex items-center gap-2 mb-2">
-                                <ImageIcon size={13} className="text-indigo-500" />
-                                <span className="text-xs font-semibold text-gray-700">{sm.images.length} images found</span>
-                                <span className="text-[10px] text-gray-400">
-                                  ({sm.images.filter(i => i.source === "Google").length} Google,{" "}
-                                  {sm.images.filter(i => i.source === "Firecrawl").length} Firecrawl)
-                                </span>
-                              </div>
-                              <div className="grid grid-cols-5 gap-1.5 max-h-[420px] overflow-y-auto pr-1">
-                                {sm.images.map((img) => {
-                                  const isSelected = sm.selected?.id === img.id;
-                                  return (
-                                    <div
-                                      key={img.id}
-                                      onClick={() => selectMedia(slide.id, img)}
-                                      className={`relative rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${
-                                        isSelected ? "border-indigo-500 shadow-md" : "border-transparent hover:border-gray-300"
-                                      }`}
-                                    >
-                                      <div className="aspect-[4/3] bg-gray-100">
-                                        <img
-                                          src={img.thumbnail} alt={img.title || img.source}
-                                          className="w-full h-full object-cover" loading="lazy"
-                                          onError={(e) => { (e.target as HTMLImageElement).src = `https://picsum.photos/seed/${img.id}/400/300`; }}
-                                        />
-                                      </div>
-                                      <div className="absolute top-1 left-1 flex gap-0.5">
-                                        <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-black/60 text-white">{img.source}</span>
-                                        {img.width >= 1920 && (
-                                          <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-green-500/80 text-white">HD</span>
-                                        )}
-                                      </div>
-                                      {isSelected && (
-                                        <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-indigo-500 flex items-center justify-center">
-                                          <Check size={9} className="text-white" />
+                            <div className={`mb-3 ${isVideoMode && sm.videos.length > 0 ? "grid grid-cols-2 gap-4" : ""}`}>
+                              {/* Images column */}
+                              <div>
+                                <div className="flex items-center gap-2 mb-2">
+                                  <ImageIcon size={13} className="text-indigo-500" />
+                                  <span className="text-xs font-semibold text-gray-700">{sm.images.length} images</span>
+                                  <span className="text-[10px] text-gray-400">
+                                    ({sm.images.filter(i => i.source === "Imagn").length} Imagn,{" "}
+                                    {sm.images.filter(i => i.source === "Imago").length} Imago,{" "}
+                                    {sm.images.filter(i => i.source === "Google").length} Google)
+                                  </span>
+                                </div>
+                                <div className={`grid ${isVideoMode ? "grid-cols-3" : "grid-cols-5"} gap-1.5 max-h-[420px] overflow-y-auto pr-1`}>
+                                  {sm.images.map((img) => {
+                                    const isSelected = sm.selected?.id === img.id;
+                                    return (
+                                      <div
+                                        key={img.id}
+                                        onClick={() => selectMedia(slide.id, img)}
+                                        className={`relative rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${
+                                          isSelected ? "border-indigo-500 shadow-md" : "border-transparent hover:border-gray-300"
+                                        }`}
+                                      >
+                                        <div className="aspect-[4/3] bg-gray-100">
+                                          <img
+                                            src={img.thumbnail} alt={img.title || img.source}
+                                            className="w-full h-full object-cover" loading="lazy"
+                                            onError={(e) => { (e.target as HTMLImageElement).src = `https://picsum.photos/seed/${img.id}/400/300`; }}
+                                          />
                                         </div>
-                                      )}
-                                      <div className="px-1 py-0.5">
-                                        <p className="text-[8px] text-gray-600 truncate m-0">{img.title || img.author}</p>
+                                        <div className="absolute top-1 left-1 flex gap-0.5">
+                                          <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-black/60 text-white">{img.source}</span>
+                                          {img.width >= 1920 && (
+                                            <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-green-500/80 text-white">HD</span>
+                                          )}
+                                        </div>
+                                        {isSelected && (
+                                          <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-indigo-500 flex items-center justify-center">
+                                            <Check size={9} className="text-white" />
+                                          </div>
+                                        )}
+                                        <div className="px-1 py-0.5">
+                                          <p className="text-[8px] text-gray-600 truncate m-0">{img.title || img.author}</p>
+                                        </div>
                                       </div>
-                                    </div>
-                                  );
-                                })}
+                                    );
+                                  })}
+                                </div>
                               </div>
+
+                              {/* Videos column (video mode only) */}
+                              {isVideoMode && sm.videos.length > 0 && (
+                                <div>
+                                  <div className="flex items-center gap-2 mb-2">
+                                    <Film size={13} className="text-red-500" />
+                                    <span className="text-xs font-semibold text-gray-700">{sm.videos.length} videos</span>
+                                  </div>
+                                  <div className="grid grid-cols-2 gap-1.5 max-h-[420px] overflow-y-auto pr-1">
+                                    {sm.videos.map((vid) => {
+                                      const isSelected = sm.selected?.id === vid.id;
+                                      return (
+                                        <div
+                                          key={vid.id}
+                                          onClick={() => selectMedia(slide.id, vid)}
+                                          className={`relative rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${
+                                            isSelected ? "border-indigo-500 shadow-md" : "border-transparent hover:border-gray-300"
+                                          }`}
+                                        >
+                                          <div className="aspect-video bg-gray-100">
+                                            <img
+                                              src={vid.thumbnail} alt={vid.title || "Video"}
+                                              className="w-full h-full object-cover" loading="lazy"
+                                              onError={(e) => { (e.target as HTMLImageElement).src = `https://picsum.photos/seed/${vid.id}/400/225`; }}
+                                            />
+                                          </div>
+                                          <div className="absolute top-1 left-1">
+                                            <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-red-500/80 text-white">{vid.source}</span>
+                                          </div>
+                                          {isSelected && (
+                                            <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-indigo-500 flex items-center justify-center">
+                                              <Check size={9} className="text-white" />
+                                            </div>
+                                          )}
+                                          <div className="px-1 py-0.5">
+                                            <p className="text-[8px] text-gray-600 truncate m-0">{vid.title || vid.author}</p>
+                                          </div>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           )}
                         </>

@@ -5,17 +5,7 @@ import { spawn } from "child_process";
 import path from "path";
 import fs from "fs/promises";
 import type { VideoComposition } from "@/lib/remotion-config";
-
-type ExportJob = {
-  id: string;
-  status: "queued" | "downloading" | "preparing" | "remotion_rendering" | "complete" | "error";
-  progress: number;
-  output_url?: string;
-  error?: string;
-  created_at: string;
-};
-
-const jobs = new Map<string, ExportJob>();
+import { jobStore, type ExportJob } from "@/lib/job-store";
 
 // Ensure output dirs exist
 const TMP_DIR = path.join(process.cwd(), "tmp", "exports");
@@ -39,7 +29,7 @@ export async function POST(req: NextRequest) {
       progress: 0,
       created_at: new Date().toISOString(),
     };
-    jobs.set(jobId, job);
+    await jobStore.set(job);
 
     // Write composition to a temp file for the render script to read
     const compPath = path.join(TMP_DIR, `${jobId}-composition.json`);
@@ -65,7 +55,7 @@ export async function POST(req: NextRequest) {
         stdio: ["ignore", "pipe", "pipe"],
       });
 
-      child.stdout.on("data", (data: Buffer) => {
+      child.stdout.on("data", async (data: Buffer) => {
         const line = data.toString().trim();
         // Parse progress updates from the render script
         // Format: PROGRESS:stage:percentage
@@ -73,11 +63,11 @@ export async function POST(req: NextRequest) {
           const parts = line.split(":");
           const stage = parts[1];
           const pct = parseInt(parts[2], 10);
-          const j = jobs.get(jobId);
+          const j = await jobStore.get(jobId);
           if (j) {
             j.status = stage as ExportJob["status"];
             j.progress = pct;
-            jobs.set(jobId, j);
+            await jobStore.set(j);
           }
         }
       });
@@ -87,7 +77,7 @@ export async function POST(req: NextRequest) {
       });
 
       child.on("close", async (code) => {
-        const j = jobs.get(jobId);
+        const j = await jobStore.get(jobId);
         if (!j) return;
 
         if (code === 0) {
@@ -98,7 +88,7 @@ export async function POST(req: NextRequest) {
           j.status = "error";
           j.error = `Render process exited with code ${code}`;
         }
-        jobs.set(jobId, j);
+        await jobStore.set(j);
 
         // Cleanup composition file
         await fs.unlink(compPath).catch(() => {});
@@ -124,7 +114,7 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const jobId = req.nextUrl.searchParams.get("job_id");
   if (!jobId) return NextResponse.json({ error: "job_id required" }, { status: 400 });
-  const job = jobs.get(jobId);
+  const job = await jobStore.get(jobId);
   if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
   return NextResponse.json(job);
 }
@@ -137,28 +127,28 @@ async function simulatedPipeline(jobId: string) {
   ];
 
   for (const stage of stages) {
-    const job = jobs.get(jobId);
+    const job = await jobStore.get(jobId);
     if (!job) return;
     job.status = stage.status;
-    jobs.set(jobId, job);
+    await jobStore.set(job);
 
     const startProgress = job.progress;
     const steps = 5;
     for (let i = 0; i < steps; i++) {
       await new Promise((r) => setTimeout(r, stage.duration / steps));
-      const j = jobs.get(jobId);
+      const j = await jobStore.get(jobId);
       if (j) {
         j.progress = Math.round(startProgress + ((stage.progressEnd - startProgress) / steps) * (i + 1));
-        jobs.set(jobId, j);
+        await jobStore.set(j);
       }
     }
   }
 
-  const job = jobs.get(jobId);
+  const job = await jobStore.get(jobId);
   if (job) {
     job.status = "complete";
     job.progress = 100;
     job.output_url = `/api/export/download?job_id=${jobId}`;
-    jobs.set(jobId, job);
+    await jobStore.set(job);
   }
 }

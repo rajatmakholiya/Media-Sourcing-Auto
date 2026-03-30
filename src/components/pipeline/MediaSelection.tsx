@@ -17,6 +17,9 @@ import {
   ChevronDown,
   ChevronUp,
   AlertCircle,
+  Download,
+  Copy,
+  ExternalLink,
 } from "lucide-react";
 
 // --- Types ---
@@ -91,6 +94,9 @@ export default function MediaSelection({
   const [isDemo, setIsDemo] = useState(false);
   const [searchAllLoading, setSearchAllLoading] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
+  const [showDownloadPanel, setShowDownloadPanel] = useState(false);
+  const [downloadingAll, setDownloadingAll] = useState(false);
+  const [copiedUrls, setCopiedUrls] = useState(false);
   const uploadRefs = useRef<Record<number, HTMLInputElement | null>>({});
 
   const selectedCount = segmentMedia.filter((sm) => sm.selected || sm.custom).length;
@@ -205,6 +211,78 @@ export default function MediaSelection({
         return;
       }
     }
+  };
+
+  // --- Download all ---
+  const getSelectedMediaList = () => {
+    return segmentMedia
+      .filter((sm) => sm.selected || sm.custom)
+      .map((sm) => {
+        const seg = segments.segments.find((s) => s.id === sm.segment_id);
+        const url = sm.selected?.full_url || sm.selected?.preview_url || sm.custom?.url || "";
+        return {
+          segment_id: sm.segment_id,
+          text: seg?.text || "",
+          url,
+          source: sm.selected?.source || sm.custom?.type || "",
+          type: sm.selected?.type || (sm.custom?.url.match(/\.(mp4|webm|mov)/i) ? "video" : "image"),
+        };
+      });
+  };
+
+  const copyAllUrls = async () => {
+    const list = getSelectedMediaList();
+    const text = list.map((m) => `Segment ${m.segment_id}: ${m.url}`).join("\n");
+    await navigator.clipboard.writeText(text);
+    setCopiedUrls(true);
+    setTimeout(() => setCopiedUrls(false), 2000);
+  };
+
+  const downloadUrlsAsTextFile = () => {
+    const list = getSelectedMediaList();
+    const lines = list.map((m) =>
+      `Segment ${m.segment_id} (${m.type}) — ${m.source}\nText: ${m.text}\nURL: ${m.url}\n`
+    );
+    const content = `Media URLs — ${new Date().toLocaleString()}\n${"=".repeat(50)}\n\n${lines.join("\n")}`;
+    const blob = new Blob([content], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `media-urls-${Date.now()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  };
+
+  const downloadAllMedia = async () => {
+    setDownloadingAll(true);
+    const list = getSelectedMediaList();
+
+    // First, download the URL list as a text file
+    downloadUrlsAsTextFile();
+
+    // Then download each media file
+    for (const item of list) {
+      if (!item.url) continue;
+      try {
+        const resp = await fetch(item.url);
+        const blob = await resp.blob();
+        const ext = item.type === "video" ? "mp4" : "jpg";
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `segment-${item.segment_id}.${ext}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        // Small delay between downloads so browser doesn't block them
+        await new Promise((r) => setTimeout(r, 300));
+      } catch {
+        // If CORS blocks the fetch, fall back to opening in new tab
+        window.open(item.url, "_blank");
+      }
+    }
+    setDownloadingAll(false);
   };
 
   // --- Proceed ---
@@ -537,6 +615,66 @@ export default function MediaSelection({
           </Card>
         );
       })}
+
+      {/* Download all selected media — optional */}
+      {selectedCount > 0 && (
+        <Card>
+          <button
+            className="w-full flex items-center justify-between text-left"
+            onClick={() => setShowDownloadPanel(!showDownloadPanel)}
+          >
+            <div className="flex items-center gap-2">
+              <Download size={15} className="text-indigo-500" />
+              <span className="text-sm font-semibold text-gray-900">Download selected media</span>
+              <Badge variant="info">{selectedCount} files</Badge>
+            </div>
+            {showDownloadPanel ? <ChevronUp size={14} className="text-gray-400" /> : <ChevronDown size={14} className="text-gray-400" />}
+          </button>
+
+          {showDownloadPanel && (
+            <div className="mt-3 pt-3 border-t border-gray-100">
+              {/* URL list */}
+              <div className="max-h-48 overflow-y-auto mb-3 space-y-1">
+                {getSelectedMediaList().map((item) => (
+                  <div key={item.segment_id} className="flex items-center gap-2 p-2 rounded-lg bg-gray-50 text-xs">
+                    <span className="shrink-0 w-6 h-6 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center text-[10px] font-bold">
+                      {item.segment_id}
+                    </span>
+                    <span className="flex-1 truncate text-gray-600 font-mono">{item.url || "No URL"}</span>
+                    <Badge variant={item.type === "video" ? "duration" : "keyword"}>
+                      {item.type}
+                    </Badge>
+                    {item.url && (
+                      <a href={item.url} target="_blank" rel="noopener noreferrer" className="text-gray-400 hover:text-indigo-500">
+                        <ExternalLink size={12} />
+                      </a>
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-2 flex-wrap">
+                <Button variant="secondary" onClick={copyAllUrls}>
+                  {copiedUrls ? <Check size={13} /> : <Copy size={13} />}
+                  {copiedUrls ? "Copied!" : "Copy URLs"}
+                </Button>
+                <Button variant="secondary" onClick={downloadUrlsAsTextFile}>
+                  <Download size={13} /> Save URLs (.txt)
+                </Button>
+                <Button variant="secondary" onClick={downloadAllMedia} disabled={downloadingAll}>
+                  <Download size={13} className={downloadingAll ? "animate-bounce" : ""} />
+                  {downloadingAll ? "Downloading..." : "Download all files + URLs"}
+                </Button>
+              </div>
+
+              <p className="text-[10px] text-gray-400 mt-2">
+                Optional — you can skip this and go directly to export.
+              </p>
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Bottom actions */}
       <div className="flex items-center justify-between pt-2">

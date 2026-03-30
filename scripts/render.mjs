@@ -146,6 +146,16 @@ async function main() {
 
     const bundleLocation = await bundle({
       entryPoint: path.join(ROOT, "src", "remotion", "index.ts"),
+      webpackOverride: (config) => ({
+        ...config,
+        resolve: {
+          ...config.resolve,
+          alias: {
+            ...(config.resolve?.alias || {}),
+            "@": path.join(ROOT, "src"),
+          },
+        },
+      }),
     });
 
     progress("remotion_rendering", 50);

@@ -9,9 +9,9 @@ type Props = {
 };
 
 const INTENSITY_SCALE = {
-  subtle: { zoom: 0.04, pan: 12 },
-  medium: { zoom: 0.08, pan: 25 },
-  dramatic: { zoom: 0.14, pan: 40 },
+  subtle: { zoom: 0.03, pan: 8 },
+  medium: { zoom: 0.06, pan: 16 },
+  dramatic: { zoom: 0.10, pan: 28 },
 };
 
 export const SegmentClip: React.FC<Props> = ({
@@ -31,37 +31,37 @@ export const SegmentClip: React.FC<Props> = ({
   });
 
   // Ken Burns transform
-  let transform = "scale(1.02)"; // slight default scale to avoid edge artifacts
+  let transform = "scale(1.01)"; // tiny default scale to avoid edge artifacts
   if (kenBurnsEnabled) {
     switch (segment.ken_burns_direction) {
       case "zoom-in": {
-        const scale = 1.02 + progress * intensity.zoom;
+        const scale = 1.0 + progress * intensity.zoom;
         transform = `scale(${scale})`;
         break;
       }
       case "zoom-out": {
-        const scale = 1.02 + intensity.zoom - progress * intensity.zoom;
+        const scale = 1.0 + intensity.zoom - progress * intensity.zoom;
         transform = `scale(${scale})`;
         break;
       }
       case "pan-left": {
-        const tx = interpolate(progress, [0, 1], [intensity.pan * 0.5, -intensity.pan * 0.5]);
-        transform = `scale(1.12) translateX(${tx}px)`;
+        const tx = interpolate(progress, [0, 1], [intensity.pan * 0.3, -intensity.pan * 0.3]);
+        transform = `scale(1.03) translateX(${tx}px)`;
         break;
       }
       case "pan-right": {
-        const tx = interpolate(progress, [0, 1], [-intensity.pan * 0.5, intensity.pan * 0.5]);
-        transform = `scale(1.12) translateX(${tx}px)`;
+        const tx = interpolate(progress, [0, 1], [-intensity.pan * 0.3, intensity.pan * 0.3]);
+        transform = `scale(1.03) translateX(${tx}px)`;
         break;
       }
       case "pan-up": {
-        const ty = interpolate(progress, [0, 1], [intensity.pan * 0.4, -intensity.pan * 0.4]);
-        transform = `scale(1.12) translateY(${ty}px)`;
+        const ty = interpolate(progress, [0, 1], [intensity.pan * 0.25, -intensity.pan * 0.25]);
+        transform = `scale(1.03) translateY(${ty}px)`;
         break;
       }
       case "pan-down": {
-        const ty = interpolate(progress, [0, 1], [-intensity.pan * 0.4, intensity.pan * 0.4]);
-        transform = `scale(1.12) translateY(${ty}px)`;
+        const ty = interpolate(progress, [0, 1], [-intensity.pan * 0.25, intensity.pan * 0.25]);
+        transform = `scale(1.03) translateY(${ty}px)`;
         break;
       }
     }
@@ -76,19 +76,21 @@ export const SegmentClip: React.FC<Props> = ({
 
   return (
     <AbsoluteFill style={{ overflow: "hidden", backgroundColor: "#000" }}>
-      {/* Media layer */}
-      {isVideo ? (
-        <OffthreadVideo
-          src={segment.media.url}
-          style={mediaStyle}
-          muted
-        />
-      ) : (
-        <Img
-          src={segment.media.url}
-          style={mediaStyle}
-        />
-      )}
+      {/* Media layer — skip if URL is missing (failed download) */}
+      {segment.media.url ? (
+        isVideo ? (
+          <OffthreadVideo
+            src={segment.media.url}
+            style={mediaStyle}
+            muted
+          />
+        ) : (
+          <Img
+            src={segment.media.url}
+            style={mediaStyle}
+          />
+        )
+      ) : null}
 
       {/* Cinematic vignette overlay — darkens edges for depth */}
       <AbsoluteFill

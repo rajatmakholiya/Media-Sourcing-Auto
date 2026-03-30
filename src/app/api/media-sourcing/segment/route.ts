@@ -28,7 +28,7 @@ For each slide, generate an "image_query" — this is the search term that will 
 
 CRITICAL RULES FOR QUERIES:
 1. SUBJECT-FIRST: Always lead with the main subject (person, team, place).
-   - WRONG: "running back posting 40 yard dash time" 
+   - WRONG: "running back posting 40 yard dash time"
    - RIGHT: "Le'Veon Moss Texas A&M"
 
 2. USE FULL NAMES: Always use the full name of people, not pronouns or partial names.
@@ -79,6 +79,85 @@ Respond ONLY with valid JSON, no markdown fences:
   "slide_count": 10
 }`;
 
+const MSN_VIDEO_PROMPT = `You are an expert video editor and media researcher for MSN Video stories. Your job is to break a script into short VIDEO SEGMENTS optimized for narrated video packages, and for each segment generate TWO search queries: one for a still image and one for video footage.
+
+STEP 1 — ANALYZE THE SCRIPT:
+Determine:
+- TOPIC: What is this script about?
+- TYPE: News, sports, entertainment, politics, technology, lifestyle, health, travel?
+- RECENCY: Is this about current/recent events? What time period?
+- KEY ENTITIES: Every specific person, team, organization, place, event mentioned.
+
+STEP 2 — SEGMENT FOR VIDEO:
+Each segment = one visual shot in the final narrated video. You are cutting the script for broadcast pacing.
+
+PACING RULES:
+- Target: 2–4 seconds per segment (~5–12 words spoken at 2.5 words/sec)
+- Split at natural pauses: periods, commas before conjunctions, em-dashes, clause boundaries
+- Short punchy sentences (under 12 words) → keep as ONE segment
+- Long sentences (15+ words) → split into 2–3 segments at clause boundaries
+- NEVER split mid-name, mid-title, or mid-noun-phrase
+- Transition words ("Meanwhile," "However," "In addition,") → attach to the NEXT segment
+
+DURATION:
+- Base: 2.5 words per second
+- Add 0.3s for new-topic segments, 0.2s for segments with numbers/stats
+- Min: 1.5s, Max: 5s
+
+STEP 3 — GENERATE MEDIA QUERIES:
+For each segment, generate TWO queries:
+- "image_query": Find a high-resolution editorial photograph (AP/Reuters/Getty style)
+- "video_query": Find professional B-roll footage, highlight clips, or press footage
+
+THE CARDINAL RULE: SUBJECT-FIRST QUERIES
+Queries must target WHO or WHAT the segment is about, never the action/verb.
+
+WRONG (action-focused):
+- "drawing interest football" — too vague
+- "athlete skipping workout" — wrong person will appear
+- "40 yard dash timing" — returns random sprinters
+
+RIGHT (subject-focused):
+- "Buffalo Bills NFL 2025"
+- "KC Concepcion Texas A&M wide receiver"
+- "NFL combine 40 yard dash 2025"
+
+QUERY PRIORITY:
+1. NAMED PEOPLE → Full name + role/affiliation + year. Image: find their FACE. Video: find HIGHLIGHTS.
+2. NAMED TEAMS/ORGS → Name + category + year
+3. NAMED EVENTS → Event name + year + location
+4. NAMED PLACES → Location + landmark
+5. CONCEPTS → Specific + visual terms (not abstract)
+
+QUERY RULES:
+- 3–7 words each
+- Always include year for current events/sports
+- Image queries: target a recognizable photo of the subject
+- Video queries: use terms like "highlights", "footage", "press conference", "aerial"
+- NEVER use generic verbs ("showing", "demonstrating") or meta terms ("B-roll of", "footage showing")
+- Consecutive segments about the same subject → use DIFFERENT angles to avoid visual repetition
+
+Respond ONLY with valid JSON, no markdown fences:
+{
+  "article_analysis": {
+    "topic": "brief topic",
+    "type": "news|sports|entertainment|politics|technology|lifestyle",
+    "recency": "current_events|recent|timeless",
+    "key_entities": ["specific names, teams, events"]
+  },
+  "slides": [
+    {
+      "id": 1,
+      "text": "segment text",
+      "image_query": "editorial photo search query 3-7 words",
+      "video_query": "video footage search query 3-7 words",
+      "subject": "main subject name or entity",
+      "estimated_duration_sec": 3.2
+    }
+  ],
+  "slide_count": 10
+}`;
+
 export async function POST(req: NextRequest) {
   try {
     const { script, script_type } = await req.json();
@@ -89,6 +168,9 @@ export async function POST(req: NextRequest) {
     if (!ANTHROPIC_API_KEY) {
       return NextResponse.json({ error: "ANTHROPIC_API_KEY not configured" }, { status: 500 });
     }
+
+    const isVideo = script_type === "MSN Video";
+    const systemPrompt = isVideo ? MSN_VIDEO_PROMPT : MSN_SLIDESHOW_PROMPT;
 
     let lastError = "";
     let result = null;
@@ -104,7 +186,7 @@ export async function POST(req: NextRequest) {
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
           max_tokens: 8192,
-          system: MSN_SLIDESHOW_PROMPT,
+          system: systemPrompt,
           messages: [
             { role: "user", content: `Article type: ${script_type || "MSN Slideshow"}\n\nArticle text:\n\n${script.trim()}` },
           ],
