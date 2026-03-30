@@ -1,0 +1,26 @@
+# render.yaml — Render Infrastructure-as-Code
+# Deploy: push to GitHub, connect repo in Render Dashboard, auto-deploys
+
+services:
+  - type: web
+    name: scriptvideo
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter         # $7/mo — 512 MB RAM, 0.5 CPU
+    region: oregon        # us-west, low latency
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ANTHROPIC_API_KEY
+        sync: false       # set manually in Render dashboard
+      - key: PEXELS_API_KEY
+        sync: false
+      - key: SERPER_API_KEY
+        sync: false
+      - key: FIRECRAWL_API_KEY
+        sync: false
+    disk:
+      name: video-exports
+      mountPath: /app/tmp
+      sizeGB: 1           # 1GB for rendered videos, auto-cleaned
