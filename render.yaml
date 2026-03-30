@@ -24,7 +24,5 @@ services:
         sync: false       # from Upstash dashboard
       - key: UPSTASH_REDIS_REST_TOKEN
         sync: false
-    disk:
-      name: video-exports
-      mountPath: /app/tmp
-      sizeGB: 1           # 1GB for rendered videos, auto-cleaned
+    # No persistent disk needed — videos are temp files, downloaded immediately
+    # Container filesystem is writable for /app/tmp
