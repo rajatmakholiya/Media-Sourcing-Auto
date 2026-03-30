@@ -59,13 +59,11 @@ COPY --from=builder /app/public ./public
 # Copy the Remotion render script and source (needed for bundling at render time)
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/src/remotion ./src/remotion
+COPY --from=builder /app/src/lib ./src/lib
+COPY --from=builder /app/tsconfig.json ./tsconfig.json
 
-# Copy Remotion dependencies (needed by render.mjs)
-COPY --from=deps /app/node_modules/@remotion ./node_modules/@remotion
-COPY --from=deps /app/node_modules/remotion ./node_modules/remotion
-COPY --from=deps /app/node_modules/@remotion/bundler ./node_modules/@remotion/bundler
-COPY --from=deps /app/node_modules/@remotion/renderer ./node_modules/@remotion/renderer
-COPY --from=deps /app/node_modules/@remotion/cli ./node_modules/@remotion/cli
+# Copy Remotion dependencies and their transitive deps (needed by render.mjs)
+COPY --from=deps /app/node_modules ./node_modules
 
 # Create tmp directories for exports
 RUN mkdir -p tmp/exports tmp/outputs && chown -R nextjs:nodejs tmp

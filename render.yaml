@@ -20,6 +20,10 @@ services:
         sync: false
       - key: FIRECRAWL_API_KEY
         sync: false
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false       # from Upstash dashboard
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
     disk:
       name: video-exports
       mountPath: /app/tmp

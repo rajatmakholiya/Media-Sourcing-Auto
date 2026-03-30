@@ -9,7 +9,7 @@
 !.yarn/plugins
 !.yarn/releases
 !.yarn/versions
-package-lock.json
+# package-lock.json — needed for Docker builds
 
 # testing
 /coverage
@@ -43,3 +43,6 @@ next-env.d.ts
 
 # ai
 .claude/
+
+#outputs
+tmp/
