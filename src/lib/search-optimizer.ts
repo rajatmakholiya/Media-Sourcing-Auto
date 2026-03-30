@@ -1,0 +1,264 @@
+// src/lib/search-optimizer.ts
+// Generates multiple optimized search queries from a single keyword
+// to maximize relevant, high-quality video and image results
+
+type SearchQuery = {
+  query: string;
+  purpose: "broll" | "stock" | "social" | "editorial" | "cinematic";
+  priority: number; // 1 = highest
+};
+
+type ContentAge = "any" | "24h" | "week" | "month" | "year";
+
+// Domains that block direct media downloads (captchas, paywalls, login required)
+const BLOCKED_DOMAINS = [
+  "shutterstock.com",
+  "gettyimages.com",
+  "istockphoto.com",
+  "stock.adobe.com",
+  "depositphotos.com",
+  "123rf.com",
+  "dreamstime.com",
+  "alamy.com",
+  "bigstockphoto.com",
+  "pond5.com",
+  "dissolve.com",
+  "storyblocks.com",
+  "videohive.net",
+  "envato.com",
+  "artgrid.io",
+  "motionarray.com",
+];
+
+export function isBlockedDomain(url: string): boolean {
+  const lower = url.toLowerCase();
+  return BLOCKED_DOMAINS.some((domain) => lower.includes(domain));
+}
+
+// Words that produce poor visual search results — too abstract
+const ABSTRACT_TERMS = new Set([
+  "concept", "idea", "thing", "way", "power", "real", "future",
+  "important", "essential", "key", "better", "best", "good",
+  "new", "modern", "together", "today", "world",
+]);
+
+// Classify the keyword's visual domain
+function classifyKeyword(keyword: string): string[] {
+  const kw = keyword.toLowerCase();
+  const domains: string[] = [];
+
+  if (/\b(ai|artificial intelligence|machine learning|deep learning|neural|algorithm|data|automation|robot)\b/.test(kw))
+    domains.push("tech");
+  if (/\b(business|team|office|meeting|company|startup|enterprise|corporate|work)\b/.test(kw))
+    domains.push("business");
+  if (/\b(nature|ocean|mountain|forest|sky|earth|planet|landscape|animal|wildlife)\b/.test(kw))
+    domains.push("nature");
+  if (/\b(city|urban|building|architecture|street|traffic|skyline)\b/.test(kw))
+    domains.push("urban");
+  if (/\b(health|medical|doctor|hospital|fitness|exercise|wellness)\b/.test(kw))
+    domains.push("health");
+  if (/\b(food|cooking|recipe|restaurant|kitchen|meal)\b/.test(kw))
+    domains.push("food");
+  if (/\b(sport|game|athlete|football|basketball|soccer|running)\b/.test(kw))
+    domains.push("sports");
+  if (/\b(education|school|university|learning|student|teacher|study)\b/.test(kw))
+    domains.push("education");
+  if (/\b(creative|art|design|music|film|photography|animation)\b/.test(kw))
+    domains.push("creative");
+  if (/\b(money|finance|invest|stock|crypto|bank|economy|market)\b/.test(kw))
+    domains.push("finance");
+
+  if (domains.length === 0) domains.push("general");
+  return domains;
+}
+
+// Domain-specific visual synonyms for better B-roll results
+const DOMAIN_VISUAL_TERMS: Record<string, string[]> = {
+  tech: ["computer screen code", "futuristic technology", "digital interface", "server room", "hands typing keyboard"],
+  business: ["corporate office", "business meeting", "handshake deal", "whiteboard strategy", "professional workspace"],
+  nature: ["aerial landscape", "slow motion nature", "cinematic scenery", "wildlife close up", "time lapse nature"],
+  urban: ["drone city footage", "timelapse traffic", "aerial cityscape", "night city lights", "modern architecture"],
+  health: ["hospital medical", "fitness workout", "wellness lifestyle", "medical research lab", "healthy lifestyle"],
+  food: ["cooking close up", "food preparation", "restaurant kitchen", "plating food cinematic", "fresh ingredients"],
+  sports: ["sports highlight", "athlete training", "stadium crowd", "slow motion sports", "competition footage"],
+  education: ["classroom learning", "student studying", "university campus", "online learning", "books library"],
+  creative: ["artist studio", "creative process", "design workspace", "music production", "film production"],
+  finance: ["stock market trading", "financial charts", "bank vault", "cryptocurrency digital", "money business"],
+  general: ["cinematic footage", "professional footage"],
+};
+
+// Clean the keyword — remove filler words for tighter search
+function cleanKeyword(keyword: string): string {
+  const words = keyword.toLowerCase().split(/\s+/);
+  const cleaned = words.filter((w) => !ABSTRACT_TERMS.has(w) && w.length > 2);
+  return cleaned.length > 0 ? cleaned.join(" ") : keyword;
+}
+
+// Generate optimized search queries for videos
+export function generateVideoQueries(
+  keyword: string,
+  segmentText: string,
+  contentAge: ContentAge
+): SearchQuery[] {
+  const clean = cleanKeyword(keyword);
+  const domains = classifyKeyword(keyword + " " + segmentText);
+  const queries: SearchQuery[] = [];
+
+  // 1. Stock footage query — best for B-roll
+  queries.push({
+    query: `${clean} stock footage 4K`,
+    purpose: "stock",
+    priority: 1,
+  });
+
+  // 2. Cinematic B-roll query
+  queries.push({
+    query: `${clean} cinematic B-roll footage`,
+    purpose: "cinematic",
+    priority: 1,
+  });
+
+  // 3. Domain-specific visual query
+  for (const domain of domains) {
+    const visuals = DOMAIN_VISUAL_TERMS[domain] || DOMAIN_VISUAL_TERMS.general;
+    // Pick the most relevant visual term
+    const best = visuals.find((v) =>
+      v.split(" ").some((w) => clean.includes(w))
+    ) || visuals[0];
+    queries.push({
+      query: `${best} footage HD`,
+      purpose: "broll",
+      priority: 2,
+    });
+  }
+
+  // 4. Social media query — for trending/editorial content
+  if (contentAge !== "any") {
+    queries.push({
+      query: `${clean} trending video`,
+      purpose: "social",
+      priority: 3,
+    });
+  }
+
+  // 5. Editorial / news-style query (when content is recent)
+  if (contentAge === "24h" || contentAge === "week") {
+    queries.push({
+      query: `${clean} news footage latest`,
+      purpose: "editorial",
+      priority: 2,
+    });
+  }
+
+  return queries;
+}
+
+// Generate optimized search queries for images
+export function generateImageQueries(
+  keyword: string,
+  segmentText: string,
+  contentAge: ContentAge
+): SearchQuery[] {
+  const clean = cleanKeyword(keyword);
+  const domains = classifyKeyword(keyword + " " + segmentText);
+  const queries: SearchQuery[] = [];
+
+  // 1. High-res photo query
+  queries.push({
+    query: `${clean} high resolution photo`,
+    purpose: "stock",
+    priority: 1,
+  });
+
+  // 2. Editorial/journalistic image
+  queries.push({
+    query: `${clean} professional photograph`,
+    purpose: "editorial",
+    priority: 2,
+  });
+
+  // 3. Domain-specific
+  for (const domain of domains) {
+    const visuals = DOMAIN_VISUAL_TERMS[domain] || DOMAIN_VISUAL_TERMS.general;
+    queries.push({
+      query: `${visuals[0]} photograph`,
+      purpose: "broll",
+      priority: 2,
+    });
+  }
+
+  return queries;
+}
+
+// Score and rank results based on quality signals
+export function scoreResult(result: {
+  width?: number;
+  height?: number;
+  source?: string;
+  title?: string;
+  platform?: string;
+  duration_sec?: number;
+  type: string;
+  full_url?: string;
+}): number {
+  let score = 0;
+
+  // HARD PENALTY: URLs from stock agencies that block direct downloads
+  const url = (result.full_url || "").toLowerCase();
+  if (isBlockedDomain(url)) return -1000;
+
+  // Resolution bonus
+  if (result.width) {
+    if (result.width >= 3840) score += 30;       // 4K
+    else if (result.width >= 1920) score += 20;   // Full HD
+    else if (result.width >= 1280) score += 10;   // HD
+    else if (result.width >= 1200) score += 5;
+  }
+
+  // For videos: prefer short clips (better for B-roll)
+  if (result.type === "video" && result.duration_sec) {
+    if (result.duration_sec <= 15) score += 15;       // Perfect for segments
+    else if (result.duration_sec <= 30) score += 10;
+    else if (result.duration_sec <= 60) score += 5;
+    else if (result.duration_sec > 300) score -= 10;  // Too long, likely a full video
+  }
+
+  // Source quality bonus
+  if (result.source === "Pexels" || result.source === "Pixabay") score += 10; // Royalty-free, safe
+  if (result.source === "Google") score += 5;
+
+  // Platform bonus for videos
+  if (result.platform === "YouTube") score += 5;
+  if (result.platform === "Vimeo") score += 8; // Vimeo tends to be higher quality
+
+  // Penalize likely low-quality results based on title
+  const title = (result.title || "").toLowerCase();
+  if (title.includes("reaction") || title.includes("unboxing")) score -= 15;
+  if (title.includes("compilation")) score -= 10;
+  if (title.includes("meme") || title.includes("funny")) score -= 10;
+  if (title.includes("tutorial") || title.includes("how to")) score -= 5;
+  if (title.includes("stock footage") || title.includes("b-roll")) score += 10;
+  if (title.includes("cinematic") || title.includes("4k")) score += 8;
+  if (title.includes("drone") || title.includes("aerial")) score += 5;
+  if (title.includes("timelapse") || title.includes("time-lapse")) score += 5;
+  if (title.includes("slow motion") || title.includes("slowmo")) score += 5;
+
+  return score;
+}
+
+// Deduplicate results by visual similarity (URL-based)
+export function deduplicateResults<T extends { full_url: string; thumbnail: string }>(
+  results: T[]
+): T[] {
+  const seen = new Set<string>();
+  return results.filter((r) => {
+    // Normalize URL for dedup
+    const key = r.full_url
+      .replace(/^https?:\/\//, "")
+      .replace(/[?#].*$/, "")
+      .toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
