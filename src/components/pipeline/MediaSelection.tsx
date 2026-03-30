@@ -349,7 +349,7 @@ export default function MediaSelection({
               <div className="flex flex-col gap-1">
                 {[
                   { id: "google", label: "Google Images & Videos (Serper)" },
-                  { id: "firecrawl", label: "Imagn + Imago (Firecrawl)" },
+                  { id: "firecrawl", label: "Deep web search (Firecrawl)" },
                 ].map((src) => (
                   <label key={src.id} className="flex items-center gap-1.5 text-xs text-gray-700 cursor-pointer">
                     <input

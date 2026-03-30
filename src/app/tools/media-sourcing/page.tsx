@@ -275,7 +275,7 @@ export default function MediaSourcingPage() {
                       </span>
                     </div>
                     <p className="text-[11px] text-gray-500 m-0">
-                      Slideshow articles — images only. Breaks into slides, searches Imagn/Imago/Google.
+                      Slideshow articles — images only. Breaks into slides, searches Google HD + Firecrawl.
                     </p>
                   </button>
                   <button
@@ -465,7 +465,7 @@ export default function MediaSourcingPage() {
                       {sm.loading && (
                         <div className="flex items-center justify-center py-8 gap-3">
                           <Spinner size={24} />
-                          <span className="text-sm text-gray-500">Searching Imagn, Imago & Google...</span>
+                          <span className="text-sm text-gray-500">Searching Google & Firecrawl...</span>
                         </div>
                       )}
 
@@ -482,9 +482,7 @@ export default function MediaSourcingPage() {
                                   <ImageIcon size={13} className="text-indigo-500" />
                                   <span className="text-xs font-semibold text-gray-700">{sm.images.length} images</span>
                                   <span className="text-[10px] text-gray-400">
-                                    ({sm.images.filter(i => i.source === "Imagn").length} Imagn,{" "}
-                                    {sm.images.filter(i => i.source === "Imago").length} Imago,{" "}
-                                    {sm.images.filter(i => i.source === "Google").length} Google)
+                                    ({sm.images.filter(i => i.source === "Google").length} Google, {sm.images.filter(i => i.source === "Firecrawl").length} Firecrawl)
                                   </span>
                                 </div>
                                 <div className={`grid ${isVideoMode ? "grid-cols-3" : "grid-cols-5"} gap-1.5 max-h-[420px] overflow-y-auto pr-1`}>

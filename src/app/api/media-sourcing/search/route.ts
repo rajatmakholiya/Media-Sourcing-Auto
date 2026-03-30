@@ -1,7 +1,6 @@
 // src/app/api/media-sourcing/search/route.ts
-// Media search for MSN Slideshow articles
-// Priority: Imagn/Imago (8-10 images) + Google (4-5 images)
-// Images only — no video for slideshows
+// Media search for MSN articles
+// Sources: Google Images via Serper (primary) + Google Images via Firecrawl (supplementary)
 import { NextRequest, NextResponse } from "next/server";
 import { isBlockedDomain, deduplicateResults } from "@/lib/search-optimizer";
 
@@ -16,28 +15,28 @@ type MediaResult = {
   width: number;
   height: number;
   title?: string;
-  page_url?: string; // link back to the source page
+  page_url?: string;
 };
 
 // ============================================
-// SERPER — Google Images
+// SERPER — Google Images (HD)
 // ============================================
-async function googleImages(query: string, count: number): Promise<MediaResult[]> {
+async function googleImages(query: string, count: number, minWidth = 800): Promise<MediaResult[]> {
   const key = process.env.SERPER_API_KEY;
   if (!key) return [];
   try {
     const res = await fetch("https://google.serper.dev/images", {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
-      body: JSON.stringify({ q: `${query} imagesize:large`, num: count * 3 }),
+      body: JSON.stringify({ q: query, num: Math.min(count * 3, 40) }),
     });
     if (!res.ok) return [];
     const data = await res.json();
     const results: MediaResult[] = [];
     for (const img of data.images || []) {
-      if (img.imageUrl && img.imageWidth >= 800 && !isBlockedDomain(img.imageUrl)) {
+      if (img.imageUrl && img.imageWidth >= minWidth && !isBlockedDomain(img.imageUrl)) {
         results.push({
-          id: `google-${results.length}-${Date.now()}`,
+          id: `serper-${results.length}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           type: "image",
           thumbnail: img.thumbnailUrl || img.imageUrl,
           preview_url: img.imageUrl,
@@ -57,17 +56,22 @@ async function googleImages(query: string, count: number): Promise<MediaResult[]
 }
 
 // ============================================
-// FIRECRAWL — Imagn search
+// FIRECRAWL — Google Image Search (deeper extraction, different results)
 // ============================================
-async function imagnImages(query: string, count: number): Promise<MediaResult[]> {
+async function firecrawlGoogleImages(query: string, count: number): Promise<MediaResult[]> {
   const key = process.env.FIRECRAWL_API_KEY;
   if (!key) return [];
   try {
+    console.log(`[firecrawl-images] Searching: "${query}" (limit: ${count + 5})`);
+
     const res = await fetch("https://api.firecrawl.dev/v1/search", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${key}`,
+      },
       body: JSON.stringify({
-        query: `site:imagn.com ${query}`,
+        query: `${query} high resolution photo`,
         limit: count + 5,
         scrapeOptions: {
           formats: ["extract"],
@@ -75,47 +79,57 @@ async function imagnImages(query: string, count: number): Promise<MediaResult[]>
             schema: {
               type: "object",
               properties: {
-                page_images: {
+                images: {
                   type: "array",
                   items: {
                     type: "object",
                     properties: {
-                      image_url: { type: "string" },
-                      thumbnail_url: { type: "string" },
-                      title: { type: "string" },
-                      photographer: { type: "string" },
+                      url: { type: "string", description: "Direct URL to the image file (.jpg, .jpeg, .png, .webp)" },
+                      alt: { type: "string", description: "Alt text or caption" },
+                      credit: { type: "string", description: "Photo credit or source" },
                     },
-                    required: ["image_url"],
+                    required: ["url"],
                   },
                 },
               },
-              required: ["page_images"],
+              required: ["images"],
             },
-            prompt: "Extract all editorial photo image URLs from this Imagn page. Get the highest resolution img src URLs (.jpg, .jpeg, .png, .webp). Ignore icons, logos, and navigation images.",
+            prompt: "Extract all high-quality photograph URLs from this page. Get img src attributes with file extensions .jpg, .jpeg, .png, .webp. Only include actual photographs — ignore icons, logos, avatars, ads, and UI elements. Prefer the largest/highest resolution version.",
           },
         },
       }),
     });
-    if (!res.ok) return [];
+
+    if (!res.ok) {
+      const errBody = await res.text().catch(() => "");
+      console.error(`[firecrawl-images] API error ${res.status}: ${errBody.slice(0, 500)}`);
+      if (res.status === 402) console.error("[firecrawl-images] CREDITS EXHAUSTED");
+      if (res.status === 401) console.error("[firecrawl-images] INVALID API KEY");
+      if (res.status === 429) console.error("[firecrawl-images] RATE LIMITED");
+      return [];
+    }
+
     const data = await res.json();
+    console.log(`[firecrawl-images] Got ${data.data?.length || 0} search results`);
     const results: MediaResult[] = [];
 
     for (const result of data.data || []) {
       const pageTitle = result.title || "";
       const pageUrl = result.url || "";
+      const extractedImages = result.extract?.images || [];
 
-      for (const img of result.extract?.page_images || []) {
-        if (img.image_url?.startsWith("http") && isValidImage(img.image_url)) {
+      for (const img of extractedImages) {
+        if (img.url?.startsWith("http") && isValidImageUrl(img.url) && !isBlockedDomain(img.url)) {
           results.push({
-            id: `imagn-${results.length}-${Date.now()}`,
+            id: `fc-${results.length}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             type: "image",
-            thumbnail: img.thumbnail_url || img.image_url,
-            preview_url: img.image_url,
-            full_url: img.image_url,
-            source: "Imagn",
-            author: img.photographer || "Imagn",
+            thumbnail: img.url,
+            preview_url: img.url,
+            full_url: img.url,
+            source: "Firecrawl",
+            author: img.credit || getDomainName(pageUrl),
             width: 1200, height: 800,
-            title: img.title || pageTitle.slice(0, 80),
+            title: img.alt || pageTitle.slice(0, 80),
             page_url: pageUrl,
           });
         }
@@ -124,129 +138,32 @@ async function imagnImages(query: string, count: number): Promise<MediaResult[]>
 
       // og:image fallback
       const ogImage = result.metadata?.ogImage || result.metadata?.["og:image"];
-      if (ogImage?.startsWith("http") && isValidImage(ogImage) && !results.some((r) => r.full_url === ogImage)) {
-        results.push({
-          id: `imagn-og-${results.length}-${Date.now()}`,
-          type: "image", thumbnail: ogImage, preview_url: ogImage, full_url: ogImage,
-          source: "Imagn", author: "Imagn", width: 1200, height: 800,
-          title: pageTitle.slice(0, 80), page_url: pageUrl,
-        });
-      }
-      if (results.length >= count) break;
-    }
-
-    console.log(`[imagn] Found ${results.length} images for "${query}"`);
-    return results.slice(0, count);
-  } catch (err) {
-    console.error("[imagn]", err);
-    return [];
-  }
-}
-
-// ============================================
-// FIRECRAWL — Imago search
-// ============================================
-async function imagoImages(query: string, count: number): Promise<MediaResult[]> {
-  const key = process.env.FIRECRAWL_API_KEY;
-  if (!key) return [];
-  try {
-    const res = await fetch("https://api.firecrawl.dev/v1/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        query: `site:imago-images.com ${query}`,
-        limit: count + 5,
-        scrapeOptions: {
-          formats: ["extract"],
-          extract: {
-            schema: {
-              type: "object",
-              properties: {
-                page_images: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      image_url: { type: "string" },
-                      thumbnail_url: { type: "string" },
-                      title: { type: "string" },
-                      photographer: { type: "string" },
-                    },
-                    required: ["image_url"],
-                  },
-                },
-              },
-              required: ["page_images"],
-            },
-            prompt: "Extract editorial photo image URLs from this Imago Images page. Get img src URLs for actual photographs, not icons or UI elements.",
-          },
-        },
-      }),
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const results: MediaResult[] = [];
-
-    for (const result of data.data || []) {
-      const pageTitle = result.title || "";
-      const pageUrl = result.url || "";
-
-      for (const img of result.extract?.page_images || []) {
-        if (img.image_url?.startsWith("http") && isValidImage(img.image_url)) {
+      if (ogImage?.startsWith("http") && isValidImageUrl(ogImage) && !isBlockedDomain(ogImage)) {
+        if (!results.some((r) => r.full_url === ogImage)) {
           results.push({
-            id: `imago-${results.length}-${Date.now()}`,
-            type: "image", thumbnail: img.thumbnail_url || img.image_url,
-            preview_url: img.image_url, full_url: img.image_url,
-            source: "Imago", author: img.photographer || "Imago",
+            id: `fc-og-${results.length}-${Date.now()}`,
+            type: "image",
+            thumbnail: ogImage, preview_url: ogImage, full_url: ogImage,
+            source: "Firecrawl", author: getDomainName(pageUrl),
             width: 1200, height: 800,
-            title: img.title || pageTitle.slice(0, 80), page_url: pageUrl,
+            title: pageTitle.slice(0, 80), page_url: pageUrl,
           });
         }
-        if (results.length >= count) break;
       }
 
-      const ogImage = result.metadata?.ogImage || result.metadata?.["og:image"];
-      if (ogImage?.startsWith("http") && isValidImage(ogImage) && !results.some((r) => r.full_url === ogImage)) {
-        results.push({
-          id: `imago-og-${results.length}-${Date.now()}`,
-          type: "image", thumbnail: ogImage, preview_url: ogImage, full_url: ogImage,
-          source: "Imago", author: "Imago", width: 1200, height: 800,
-          title: pageTitle.slice(0, 80), page_url: pageUrl,
-        });
-      }
       if (results.length >= count) break;
     }
 
-    console.log(`[imago] Found ${results.length} images for "${query}"`);
+    console.log(`[firecrawl-images] Final: ${results.length} valid images for "${query}"`);
     return results.slice(0, count);
   } catch (err) {
-    console.error("[imago]", err);
+    console.error("[firecrawl-images] Exception:", err instanceof Error ? err.message : err);
     return [];
   }
 }
 
-function isValidImage(url: string): boolean {
-  const lower = url.toLowerCase();
-  if (lower.includes("icon") || lower.includes("logo") || lower.includes("favicon") || lower.includes("sprite")) return false;
-  return /\.(jpg|jpeg|png|webp|gif)(\?.*)?$/i.test(lower) ||
-    lower.includes("/image") || lower.includes("/photo") || lower.includes("cdn") || lower.includes("media");
-}
-
-// Demo
-function demoImages(query: string, count: number): MediaResult[] {
-  const seed = query.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
-  return Array.from({ length: count }).map((_, i) => ({
-    id: `demo-${seed}-${i}`, type: "image" as const,
-    thumbnail: `https://picsum.photos/seed/${seed + i}/400/300`,
-    preview_url: `https://picsum.photos/seed/${seed + i}/800/600`,
-    full_url: `https://picsum.photos/seed/${seed + i}/1920/1080`,
-    source: i < 6 ? "Imagn" : i < 9 ? "Imago" : "Google",
-    author: "Demo", width: 1920, height: 1080,
-  }));
-}
-
 // ============================================
-// SERPER — Google Videos (for video mode)
+// SERPER — Google Videos
 // ============================================
 async function googleVideos(query: string, count: number): Promise<MediaResult[]> {
   const key = process.env.SERPER_API_KEY;
@@ -263,8 +180,8 @@ async function googleVideos(query: string, count: number): Promise<MediaResult[]
     for (const vid of data.videos || []) {
       if (vid.link && !isBlockedDomain(vid.link)) {
         results.push({
-          id: `google-vid-${results.length}-${Date.now()}`,
-          type: "image", // keep type as image for unified handling in UI
+          id: `vid-${results.length}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          type: "image",
           thumbnail: vid.thumbnailUrl || vid.imageUrl || "",
           preview_url: vid.link,
           full_url: vid.link,
@@ -279,6 +196,34 @@ async function googleVideos(query: string, count: number): Promise<MediaResult[]
     }
     return results;
   } catch { return []; }
+}
+
+// ============================================
+// Helpers
+// ============================================
+function isValidImageUrl(url: string): boolean {
+  const lower = url.toLowerCase();
+  if (lower.includes("icon") || lower.includes("logo") || lower.includes("favicon") || lower.includes("sprite") || lower.includes("avatar")) return false;
+  if (lower.includes("1x1") || lower.includes("pixel") || lower.includes("tracking")) return false;
+  return /\.(jpg|jpeg|png|webp|gif)(\?.*)?$/i.test(lower) ||
+    lower.includes("/image") || lower.includes("/photo") ||
+    lower.includes("cdn") || lower.includes("media") || lower.includes("static");
+}
+
+function getDomainName(url: string): string {
+  try { return new URL(url).hostname.replace("www.", ""); } catch { return "Web"; }
+}
+
+// Demo fallback
+function demoImages(query: string, count: number): MediaResult[] {
+  const seed = query.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+  return Array.from({ length: count }).map((_, i) => ({
+    id: `demo-${seed}-${i}`, type: "image" as const,
+    thumbnail: `https://picsum.photos/seed/${seed + i}/400/300`,
+    preview_url: `https://picsum.photos/seed/${seed + i}/800/600`,
+    full_url: `https://picsum.photos/seed/${seed + i}/1920/1080`,
+    source: "Google", author: "Demo", width: 1920, height: 1080,
+  }));
 }
 
 export async function POST(req: NextRequest) {
@@ -298,21 +243,22 @@ export async function POST(req: NextRequest) {
     const videoSearches: Promise<MediaResult[]>[] = [];
     const sources: string[] = [];
 
-    // Imagn/Imago first (priority) — 5 each
-    if (hasFirecrawl) {
-      imageSearches.push(imagnImages(query, 5));
-      imageSearches.push(imagoImages(query, 5));
-      sources.push("Imagn", "Imago");
-    }
-
-    // Google Images — 5
+    // Serper — Google Images (primary, fast)
     if (hasSerper) {
-      imageSearches.push(googleImages(query, 5));
-      imageSearches.push(googleImages(`${query} latest`, 3));
+      imageSearches.push(googleImages(`${query} high resolution`, 6, 1200));
+      imageSearches.push(googleImages(`${query} editorial photo`, 5, 800));
+      imageSearches.push(googleImages(`${query} latest`, 4, 800));
       sources.push("Google");
     }
 
-    // Video search (only in video mode)
+    // Firecrawl — Google deep extraction (supplementary, different results)
+    if (hasFirecrawl) {
+      imageSearches.push(firecrawlGoogleImages(query, 6));
+      imageSearches.push(firecrawlGoogleImages(`${query} HD photo`, 4));
+      sources.push("Firecrawl");
+    }
+
+    // Video search (video mode only)
     if (isVideoMode && hasSerper && video_query) {
       videoSearches.push(googleVideos(video_query, 5));
       videoSearches.push(googleVideos(`${video_query} highlights`, 3));
@@ -327,9 +273,12 @@ export async function POST(req: NextRequest) {
     const uniqueImages = deduplicateResults(imageResults).slice(0, 15);
     const uniqueVideos = deduplicateResults(videoResults).slice(0, 8);
 
-    // Sort: Imagn first, then Imago, then Google
-    const sourceOrder: Record<string, number> = { Imagn: 0, Imago: 1, Google: 2, "Google Video": 3, Demo: 4 };
-    uniqueImages.sort((a, b) => (sourceOrder[a.source] ?? 9) - (sourceOrder[b.source] ?? 9));
+    // Sort by resolution — largest first
+    uniqueImages.sort((a, b) => (b.width * b.height) - (a.width * a.height));
+
+    console.log(`[media-sourcing/search] "${query}" → ${uniqueImages.length} images (${
+      imageResults.filter(r => r.source === "Google").length} Serper, ${
+      imageResults.filter(r => r.source === "Firecrawl").length} Firecrawl), ${uniqueVideos.length} videos`);
 
     return NextResponse.json({ slide_id, images: uniqueImages, videos: uniqueVideos, sources, is_demo: false });
   } catch (err) {
