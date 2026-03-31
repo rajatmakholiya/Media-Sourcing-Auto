@@ -33,6 +33,10 @@ import {
   Check,
   Loader,
   RotateCcw,
+  ExternalLink,
+  Copy,
+  FileText,
+  Image as ImageIcon,
 } from "lucide-react";
 
 type ExportPhase = "config" | "exporting" | "complete" | "error";
@@ -168,6 +172,47 @@ export default function PreviewExport({
       ...prev,
       captions: { ...prev.captions, ...partial },
     }));
+  };
+
+  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
+
+  const copyToClipboard = (text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedUrl(text);
+    setTimeout(() => setCopiedUrl(null), 1500);
+  };
+
+  const downloadMediaAsTxt = () => {
+    const lines = composition.segments.map((seg) => {
+      const label = `Segment ${seg.id} (${seg.keyword})`;
+      const url = seg.media.url || "No media selected";
+      const type = seg.media.type || "image";
+      return `${label}\n  Type: ${type}\n  URL: ${url}`;
+    });
+    const blob = new Blob([lines.join("\n\n")], { type: "text/plain" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "selected-media.txt";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  const downloadMediaAsJson = () => {
+    const data = composition.segments.map((seg) => ({
+      segment_id: seg.id,
+      keyword: seg.keyword,
+      text: seg.text,
+      duration_sec: seg.duration_sec,
+      media_type: seg.media.type,
+      media_url: seg.media.url,
+      media_source: seg.media.source,
+    }));
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "selected-media.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
   };
 
   // =====================
@@ -789,6 +834,64 @@ export default function PreviewExport({
               : settings.transitions[0] || "no"}{" "}
             transitions, Ken Burns {settings.ken_burns.enabled ? settings.ken_burns.intensity : "off"} — exported as {settings.resolution} MP4.
           </span>
+        </div>
+      </Card>
+
+      {/* Selected Media */}
+      <Card>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-gray-900">Selected media</h3>
+          <div className="flex gap-1.5">
+            <Button variant="ghost" onClick={downloadMediaAsTxt}>
+              <FileText size={12} /> .txt
+            </Button>
+            <Button variant="ghost" onClick={downloadMediaAsJson}>
+              <Download size={12} /> .json
+            </Button>
+          </div>
+        </div>
+        <div className="space-y-2">
+          {composition.segments.map((seg) => (
+            <div key={seg.id} className="flex items-center gap-3 p-2 rounded-lg bg-gray-50 border border-gray-100">
+              <div className="w-16 h-10 rounded overflow-hidden bg-gray-200 shrink-0">
+                <img
+                  src={seg.media.url || `https://picsum.photos/seed/${seg.id}/400/300`}
+                  alt="" className="w-full h-full object-cover"
+                  onError={(e) => { (e.target as HTMLImageElement).src = `https://picsum.photos/seed/${seg.id}/400/300`; }}
+                />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] font-semibold text-gray-500">#{seg.id}</span>
+                  <span className="text-xs font-medium text-gray-800 truncate">{seg.keyword}</span>
+                  <Badge variant="info">{seg.media.type || "image"}</Badge>
+                </div>
+                {seg.media.url ? (
+                  <a
+                    href={seg.media.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-[11px] text-indigo-500 hover:text-indigo-700 truncate block mt-0.5 max-w-full"
+                    title={seg.media.url}
+                  >
+                    {seg.media.url.length > 70 ? seg.media.url.slice(0, 70) + "..." : seg.media.url}
+                    <ExternalLink size={9} className="inline ml-1 -mt-0.5" />
+                  </a>
+                ) : (
+                  <span className="text-[11px] text-gray-400 mt-0.5 block">No media URL</span>
+                )}
+              </div>
+              {seg.media.url && (
+                <button
+                  onClick={() => copyToClipboard(seg.media.url)}
+                  className="p-1.5 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600 shrink-0"
+                  title="Copy URL"
+                >
+                  {copiedUrl === seg.media.url ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
+                </button>
+              )}
+            </div>
+          ))}
         </div>
       </Card>
 

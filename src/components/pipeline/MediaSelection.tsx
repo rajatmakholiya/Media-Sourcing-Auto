@@ -112,9 +112,12 @@ export default function MediaSelection({
       const seg = segments.segments.find((s) => s.id === segId);
 
       try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
         const resp = await fetch("/api/media-search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
           body: JSON.stringify({
             image_query: overrideQuery || seg?.image_query || seg?.keyword || "general",
             video_query: overrideQuery || seg?.video_query || seg?.keyword || "general footage",
@@ -123,6 +126,7 @@ export default function MediaSelection({
             sources: enabledSources,
           }),
         });
+        clearTimeout(timeout);
 
         if (!resp.ok) throw new Error("Search failed");
         const data = await resp.json();
@@ -146,9 +150,7 @@ export default function MediaSelection({
 
   const searchAll = useCallback(async () => {
     setSearchAllLoading(true);
-    for (const seg of segments.segments) {
-      await searchSegment(seg.id);
-    }
+    await Promise.all(segments.segments.map((seg) => searchSegment(seg.id)));
     setSearchAllLoading(false);
     setExpandedSeg(segments.segments[0]?.id ?? null);
   }, [segments, searchSegment]);

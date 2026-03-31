@@ -5,6 +5,13 @@
 
 import { isBlockedDomain, deduplicateResults, scoreResult } from "./search-optimizer";
 
+/** Fetch with timeout — prevents hanging on slow APIs */
+function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 10000): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+}
+
 export type MediaResult = {
   id: string;
   type: "image" | "video";
@@ -60,11 +67,11 @@ async function serperImages(query: string, count: number, age: ContentAge): Prom
     const tbs = getTimeBias(age);
     if (tbs) body.tbs = tbs;
 
-    const res = await fetch("https://google.serper.dev/images", {
+    const res = await fetchWithTimeout("https://google.serper.dev/images", {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
+    }, 8000);
     if (!res.ok) return [];
     const data = await res.json();
     const results: MediaResult[] = [];
@@ -101,11 +108,11 @@ async function serperVideos(query: string, count: number, age: ContentAge): Prom
     const tbs = getTimeBias(age);
     if (tbs) body.tbs = tbs;
 
-    const res = await fetch("https://google.serper.dev/videos", {
+    const res = await fetchWithTimeout("https://google.serper.dev/videos", {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
+    }, 8000);
     if (!res.ok) return [];
     const data = await res.json();
     const results: MediaResult[] = [];
@@ -143,7 +150,7 @@ async function firecrawlGoogleImages(query: string, count: number): Promise<Medi
   try {
     console.log(`[firecrawl-images] Searching: "${query}" (limit: ${count + 5})`);
 
-    const res = await fetch("https://api.firecrawl.dev/v1/search", {
+    const res = await fetchWithTimeout("https://api.firecrawl.dev/v1/search", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -177,7 +184,7 @@ async function firecrawlGoogleImages(query: string, count: number): Promise<Medi
           },
         },
       }),
-    });
+    }, 12000);
 
     if (!res.ok) {
       const errBody = await res.text().catch(() => "");
@@ -263,7 +270,7 @@ async function firecrawlGoogleVideos(query: string, count: number): Promise<Medi
   try {
     console.log(`[firecrawl-videos] Searching: "${query}" (limit: ${count + 3})`);
 
-    const res = await fetch("https://api.firecrawl.dev/v1/search", {
+    const res = await fetchWithTimeout("https://api.firecrawl.dev/v1/search", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -273,7 +280,7 @@ async function firecrawlGoogleVideos(query: string, count: number): Promise<Medi
         query: `${query} video footage`,
         limit: count + 3,
       }),
-    });
+    }, 12000);
 
     if (!res.ok) {
       const errBody = await res.text().catch(() => "");
@@ -403,30 +410,19 @@ export async function searchMedia(options: SearchOptions): Promise<SearchResult>
   const videoSearches: Promise<MediaResult[]>[] = [];
   const sources: string[] = [];
 
-  // Serper — fast structured results
+  // Serper — fast structured results (primary source)
   if (hasSerper) {
-    // Primary image query
-    imageSearches.push(serperImages(imageQuery, 8, contentAge));
-    // Alternate query for variety
-    const altQuery = imageQuery.includes("photo")
-      ? imageQuery.replace("photo", "image")
-      : `${imageQuery} photo`;
-    imageSearches.push(serperImages(altQuery, 6, contentAge));
-    // Third variation with "latest" for recency
-    imageSearches.push(serperImages(`${imageQuery} latest`, 5, contentAge));
+    imageSearches.push(serperImages(imageQuery, 12, contentAge));
     sources.push("Google (Serper)");
 
     if (includeVideos && videoQuery) {
-      videoSearches.push(serperVideos(videoQuery, 5, contentAge));
-      videoSearches.push(serperVideos(`${videoQuery} highlights`, 4, contentAge));
+      videoSearches.push(serperVideos(videoQuery, 6, contentAge));
     }
   }
 
-  // Firecrawl — deeper extraction, different results
+  // Firecrawl — deeper extraction, only as supplement (slow)
   if (hasFirecrawl) {
     imageSearches.push(firecrawlGoogleImages(imageQuery, 6));
-    // Variation targeting free-use sources
-    imageSearches.push(firecrawlGoogleImages(`${imageQuery} free use editorial`, 4));
     sources.push("Firecrawl");
 
     if (includeVideos && videoQuery) {
