@@ -182,19 +182,25 @@ export default function PreviewExport({
     setTimeout(() => setCopiedUrl(null), 1500);
   };
 
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   const downloadMediaAsTxt = () => {
     const lines = composition.segments.map((seg) => {
-      const label = `Segment ${seg.id} (${seg.keyword})`;
       const url = seg.media.url || "No media selected";
-      const type = seg.media.type || "image";
-      return `${label}\n  Type: ${type}\n  URL: ${url}`;
+      const duration = seg.duration_sec || 0;
+      const timeRange = duration > 0 ? ` 0:00 to ${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")}` : "";
+      return `${seg.text}\n${url}${timeRange}`;
     });
-    const blob = new Blob([lines.join("\n\n")], { type: "text/plain" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "selected-media.txt";
-    a.click();
-    URL.revokeObjectURL(a.href);
+    triggerDownload(new Blob([lines.join("\n\n")], { type: "text/plain" }), "selected-media.txt");
   };
 
   const downloadMediaAsJson = () => {
@@ -207,12 +213,7 @@ export default function PreviewExport({
       media_url: seg.media.url,
       media_source: seg.media.source,
     }));
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "selected-media.json";
-    a.click();
-    URL.revokeObjectURL(a.href);
+    triggerDownload(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }), "selected-media.json");
   };
 
   // =====================
@@ -295,15 +296,30 @@ export default function PreviewExport({
               </p>
             </div>
             <div className="flex gap-3 mt-2">
-              <Button onClick={() => {
+              <Button onClick={async () => {
                 const url = jobStatus?.output_url;
-                if (url) {
-                  const a = document.createElement("a");
-                  a.href = url;
-                  a.download = `video-${settings.aspect_ratio}-${settings.resolution}.mp4`;
-                  document.body.appendChild(a);
-                  a.click();
-                  document.body.removeChild(a);
+                if (!url) return;
+                try {
+                  const resp = await fetch(url);
+                  const contentType = resp.headers.get("Content-Type") || "";
+                  if (contentType.includes("video") || contentType.includes("octet-stream")) {
+                    // Real video file — download it
+                    const blob = await resp.blob();
+                    const blobUrl = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = blobUrl;
+                    a.download = `video-${settings.aspect_ratio}-${settings.resolution}.mp4`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(blobUrl);
+                  } else {
+                    // Simulated mode — download the composition as a project file instead
+                    downloadMediaAsTxt();
+                  }
+                } catch {
+                  // Fallback — try opening directly
+                  window.open(url, "_blank");
                 }
               }}>
                 <Download size={15} /> Download video
@@ -315,7 +331,7 @@ export default function PreviewExport({
 
             {/* Production note */}
             <div className="mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 max-w-sm text-center">
-              <strong>Demo mode:</strong> Downloads a placeholder file. Connect Remotion for real video rendering.
+              <strong>Note:</strong> Without the Remotion render script, the download button exports your script with media URLs as a text file. Add <code>scripts/render.mjs</code> for actual video rendering.
             </div>
           </div>
         </Card>
@@ -850,48 +866,51 @@ export default function PreviewExport({
             </Button>
           </div>
         </div>
-        <div className="space-y-2">
-          {composition.segments.map((seg) => (
-            <div key={seg.id} className="flex items-center gap-3 p-2 rounded-lg bg-gray-50 border border-gray-100">
-              <div className="w-16 h-10 rounded overflow-hidden bg-gray-200 shrink-0">
-                <img
-                  src={seg.media.url || `https://picsum.photos/seed/${seg.id}/400/300`}
-                  alt="" className="w-full h-full object-cover"
-                  onError={(e) => { (e.target as HTMLImageElement).src = `https://picsum.photos/seed/${seg.id}/400/300`; }}
-                />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] font-semibold text-gray-500">#{seg.id}</span>
-                  <span className="text-xs font-medium text-gray-800 truncate">{seg.keyword}</span>
-                  <Badge variant="info">{seg.media.type || "image"}</Badge>
+        <div className="space-y-2 max-h-96 overflow-y-auto">
+          {composition.segments.map((seg) => {
+            const duration = seg.duration_sec || 0;
+            const timeRange = duration > 0 ? `0:00 to ${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")}` : "";
+            return (
+              <div key={seg.id} className="p-3 rounded-lg bg-gray-50 border border-gray-100">
+                <div className="flex items-start gap-3">
+                  <div className="w-16 h-10 rounded overflow-hidden bg-gray-200 shrink-0 mt-0.5">
+                    <img
+                      src={seg.media.url || `https://picsum.photos/seed/${seg.id}/400/300`}
+                      alt="" className="w-full h-full object-cover"
+                      onError={(e) => { (e.target as HTMLImageElement).src = `https://picsum.photos/seed/${seg.id}/400/300`; }}
+                    />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-gray-800 leading-relaxed">{seg.text}</p>
+                    {seg.media.url ? (
+                      <div className="flex items-center gap-1 mt-1">
+                        <a
+                          href={seg.media.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[11px] text-indigo-500 hover:text-indigo-700 truncate max-w-[70%]"
+                          title={seg.media.url}
+                        >
+                          {seg.media.url}
+                          <ExternalLink size={9} className="inline ml-1 -mt-0.5" />
+                        </a>
+                        {timeRange && <span className="text-[10px] text-gray-400 shrink-0">{timeRange}</span>}
+                        <button
+                          onClick={() => copyToClipboard(seg.media.url)}
+                          className="p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600 shrink-0 ml-auto"
+                          title="Copy URL"
+                        >
+                          {copiedUrl === seg.media.url ? <Check size={11} className="text-green-500" /> : <Copy size={11} />}
+                        </button>
+                      </div>
+                    ) : (
+                      <span className="text-[11px] text-gray-400 mt-1 block">No media selected</span>
+                    )}
+                  </div>
                 </div>
-                {seg.media.url ? (
-                  <a
-                    href={seg.media.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-[11px] text-indigo-500 hover:text-indigo-700 truncate block mt-0.5 max-w-full"
-                    title={seg.media.url}
-                  >
-                    {seg.media.url.length > 70 ? seg.media.url.slice(0, 70) + "..." : seg.media.url}
-                    <ExternalLink size={9} className="inline ml-1 -mt-0.5" />
-                  </a>
-                ) : (
-                  <span className="text-[11px] text-gray-400 mt-0.5 block">No media URL</span>
-                )}
               </div>
-              {seg.media.url && (
-                <button
-                  onClick={() => copyToClipboard(seg.media.url)}
-                  className="p-1.5 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600 shrink-0"
-                  title="Copy URL"
-                >
-                  {copiedUrl === seg.media.url ? <Check size={13} className="text-green-500" /> : <Copy size={13} />}
-                </button>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
       </Card>
 

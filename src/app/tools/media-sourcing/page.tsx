@@ -195,7 +195,35 @@ export default function MediaSourcingPage() {
   };
 
   // --- Export ---
+  const buildExportLines = () => {
+    return slides.map((slide) => {
+      const sm = slideMedia.find((m) => m.slide_id === slide.id);
+      const mediaUrl = sm?.selected?.full_url || sm?.custom?.url || "";
+      const duration = slide.estimated_duration_sec || 0;
+      const timeRange = duration > 0 ? ` 0:00 to ${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")}` : "";
+      return { text: slide.text, url: mediaUrl, timeRange };
+    });
+  };
+
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   const handleExport = () => {
+    const lines = buildExportLines();
+    const content = lines.map((l) => `${l.text}\n${l.url}${l.timeRange}`).join("\n\n");
+    triggerDownload(new Blob([content], { type: "text/plain" }), `media-sourcing-${Date.now()}.txt`);
+    setPhase("export");
+  };
+
+  const handleExportJson = () => {
     const exportData = slides.map((slide) => {
       const sm = slideMedia.find((m) => m.slide_id === slide.id);
       return {
@@ -211,15 +239,7 @@ export default function MediaSourcingPage() {
           : null,
       };
     });
-
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `media-sourcing-${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-    setPhase("export");
+    triggerDownload(new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" }), `media-sourcing-${Date.now()}.json`);
   };
 
   // --- Render ---
@@ -371,7 +391,10 @@ export default function MediaSourcingPage() {
               <div className="flex items-center gap-2">
                 <Button variant="secondary" onClick={searchAll}><Search size={13} /> Search all</Button>
                 <Button onClick={handleExport} disabled={!allSelected}>
-                  <Download size={13} /> Export media list
+                  <Download size={13} /> Export (.txt)
+                </Button>
+                <Button variant="secondary" onClick={handleExportJson} disabled={!allSelected}>
+                  <FileText size={13} /> Export (.json)
                 </Button>
               </div>
             </div>
@@ -605,7 +628,7 @@ export default function MediaSourcingPage() {
         {/* EXPORT COMPLETE */}
         {phase === "export" && (
           <Card>
-            <div className="flex flex-col items-center py-10 gap-4">
+            <div className="flex flex-col items-center py-8 gap-4">
               <div className="w-14 h-14 rounded-full bg-green-100 flex items-center justify-center">
                 <Check size={28} className="text-green-600" />
               </div>
@@ -615,6 +638,38 @@ export default function MediaSourcingPage() {
                 <Button onClick={() => { setPhase("selection"); }}>← Back to selection</Button>
                 <Button variant="secondary" onClick={() => { setPhase("input"); setSlides([]); setSlideMedia([]); }}>
                   New article
+                </Button>
+              </div>
+            </div>
+
+            {/* Script + URL preview */}
+            <div className="border-t border-gray-100 pt-4 mt-2">
+              <h4 className="text-xs font-semibold text-gray-600 mb-3">Script with media URLs</h4>
+              <div className="space-y-3 max-h-96 overflow-y-auto">
+                {buildExportLines().map((line, i) => (
+                  <div key={i} className="p-3 rounded-lg bg-gray-50 border border-gray-100">
+                    <p className="text-sm text-gray-800 leading-relaxed">{line.text}</p>
+                    {line.url ? (
+                      <a
+                        href={line.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-indigo-500 hover:text-indigo-700 mt-1 block truncate"
+                      >
+                        {line.url}{line.timeRange}
+                      </a>
+                    ) : (
+                      <span className="text-xs text-gray-400 mt-1 block">No media selected</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="flex gap-2 mt-3">
+                <Button variant="secondary" onClick={handleExport}>
+                  <Download size={12} /> Download .txt
+                </Button>
+                <Button variant="secondary" onClick={handleExportJson}>
+                  <FileText size={12} /> Download .json
                 </Button>
               </div>
             </div>

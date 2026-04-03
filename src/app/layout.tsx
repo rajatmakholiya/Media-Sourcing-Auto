@@ -6,8 +6,8 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "ScriptVideo — Script to Video Pipeline",
-  description: "Transform scripts into social-ready videos with AI-powered segmentation and media matching",
+  title: "Studio Pro — Media Production Engine",
+  description: "AI-powered graphics engine and video production pipeline",
 };
 
 export default function RootLayout({
@@ -16,8 +16,25 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body className={inter.className}>{children}</body>
+    <html lang="en" suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: `
+          (function() {
+            try {
+              var theme = localStorage.getItem('theme');
+              if (theme === 'light') return;
+              if (theme === 'dark' || window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                document.documentElement.classList.add('dark');
+              }
+            } catch(e) {}
+          })();
+        `}} />
+      </head>
+      <body className={`${inter.className} bg-white dark:bg-[#0a0a0f] min-h-screen text-gray-900 dark:text-white transition-colors`}>
+        <main className="h-screen">
+          {children}
+        </main>
+      </body>
     </html>
   );
 }

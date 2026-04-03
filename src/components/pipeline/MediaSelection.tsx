@@ -234,26 +234,37 @@ export default function MediaSelection({
 
   const copyAllUrls = async () => {
     const list = getSelectedMediaList();
-    const text = list.map((m) => `Segment ${m.segment_id}: ${m.url}`).join("\n");
-    await navigator.clipboard.writeText(text);
+    const lines = list.map((m) => {
+      const seg = segments.segments.find((s) => s.id === m.segment_id);
+      const duration = seg?.estimated_duration_sec || 0;
+      const timeRange = duration > 0 ? ` 0:00 to ${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")}` : "";
+      return `${m.text}\n${m.url}${timeRange}`;
+    });
+    await navigator.clipboard.writeText(lines.join("\n\n"));
     setCopiedUrls(true);
     setTimeout(() => setCopiedUrls(false), 2000);
   };
 
-  const downloadUrlsAsTextFile = () => {
-    const list = getSelectedMediaList();
-    const lines = list.map((m) =>
-      `Segment ${m.segment_id} (${m.type}) — ${m.source}\nText: ${m.text}\nURL: ${m.url}\n`
-    );
-    const content = `Media URLs — ${new Date().toLocaleString()}\n${"=".repeat(50)}\n\n${lines.join("\n")}`;
-    const blob = new Blob([content], { type: "text/plain" });
+  const triggerDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `media-urls-${Date.now()}.txt`;
+    a.href = url;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(a.href);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const downloadUrlsAsTextFile = () => {
+    const list = getSelectedMediaList();
+    const lines = list.map((m) => {
+      const seg = segments.segments.find((s) => s.id === m.segment_id);
+      const duration = seg?.estimated_duration_sec || 0;
+      const timeRange = duration > 0 ? ` 0:00 to ${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")}` : "";
+      return `${m.text}\n${m.url}${timeRange}`;
+    });
+    triggerDownload(new Blob([lines.join("\n\n")], { type: "text/plain" }), `media-urls-${Date.now()}.txt`);
   };
 
   const downloadAllMedia = async () => {
