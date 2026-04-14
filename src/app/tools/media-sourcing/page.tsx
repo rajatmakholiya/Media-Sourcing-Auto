@@ -7,6 +7,7 @@ import { Card, Button, Badge, Spinner, Textarea } from "@/components/ui";
 import {
   Search, Check, X, Upload, Link as LinkIcon, ChevronDown, ChevronUp,
   RefreshCw, Download, ArrowLeft, Image as ImageIcon, FileText, Pencil, Film,
+  ExternalLink,
 } from "lucide-react";
 
 type SourcingMode = "slideshow" | "video";
@@ -34,16 +35,23 @@ type MediaResult = {
   page_url?: string;
 };
 
+type SourceStatus = "idle" | "loading" | "done" | "error";
+
 type SlideMedia = {
   slide_id: number;
   images: MediaResult[];
   videos: MediaResult[];
-  selected: MediaResult | null;
+  selected: MediaResult[];       // Multi-select: 1-3 images
   selectedVideo: MediaResult | null;
   custom: { url: string; name: string } | null;
-  loading: boolean;
+  loading: boolean;              // True while any source is still loading
   searched: boolean;
+  sourceStatus: Record<string, SourceStatus>;
 };
+
+// Sources the client fans out to, fired in parallel. Each gets its own column.
+const IMAGE_SOURCES = ["Imago", "Imagn", "Google", "Google CC", "Firecrawl", "Pexels"] as const;
+const VIDEO_SOURCES = ["Google Video"] as const;
 
 type Phase = "input" | "processing" | "selection" | "export";
 
@@ -71,9 +79,14 @@ export default function MediaSourcingPage() {
   const [editingQuery, setEditingQuery] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
   const uploadRefs = useRef<Record<number, HTMLInputElement | null>>({});
+  // Track in-flight search requests per slide. Only the latest request's response
+  // is allowed to update state — prevents stale responses from overwriting fresh results.
+  const searchTokens = useRef<Record<number, number>>({});
+  // Abort controllers so re-searching a slide cancels the previous fetch.
+  const searchAborters = useRef<Record<number, AbortController>>({});
 
   const wordCount = script.trim() ? script.trim().split(/\s+/).length : 0;
-  const selectedCount = slideMedia.filter((sm) => sm.selected || sm.custom).length;
+  const selectedCount = slideMedia.filter((sm) => sm.selected.length > 0 || sm.custom).length;
   const allSelected = slides.length > 0 && selectedCount === slides.length;
   const isVideoMode = sourcingMode === "video";
 
@@ -99,11 +112,12 @@ export default function MediaSourcingPage() {
           slide_id: s.id,
           images: [],
           videos: [],
-          selected: null,
+          selected: [],
           selectedVideo: null,
           custom: null,
           loading: false,
           searched: false,
+          sourceStatus: {},
         }))
       );
       setPhase("selection");
@@ -119,41 +133,82 @@ export default function MediaSourcingPage() {
   }, [script]);
 
   // --- Search media for a slide ---
+  // Fires one request per source in parallel. Each source's column is independently
+  // populated as it responds — slow sources show a skeleton while fast ones are already interactive.
   const searchSlide = useCallback(async (slideId: number, query?: string, slidesOverride?: Slide[]) => {
     const currentSlides = slidesOverride || slides;
     const slide = currentSlides.find((s) => s.id === slideId);
     const q = query || slide?.image_query || "";
 
+    // Cancel any in-flight requests for this slide and mint a new token.
+    searchAborters.current[slideId]?.abort();
+    const aborter = new AbortController();
+    searchAborters.current[slideId] = aborter;
+    const myToken = (searchTokens.current[slideId] || 0) + 1;
+    searchTokens.current[slideId] = myToken;
+
+    const sourcesToQuery: string[] = [
+      ...IMAGE_SOURCES,
+      ...(isVideoMode ? VIDEO_SOURCES : []),
+    ];
+
+    // Reset images/videos, mark all sources as loading, clear any prior results.
+    const initialStatus: Record<string, SourceStatus> = {};
+    for (const s of sourcesToQuery) initialStatus[s] = "loading";
     setSlideMedia((prev) =>
-      prev.map((sm) => (sm.slide_id === slideId ? { ...sm, loading: true } : sm))
+      prev.map((sm) =>
+        sm.slide_id === slideId
+          ? { ...sm, images: [], videos: [], loading: true, searched: true, sourceStatus: initialStatus }
+          : sm
+      )
     );
 
-    try {
-      const resp = await fetch("/api/media-sourcing/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          query: q,
-          video_query: slide?.video_query || q,
-          slide_id: slideId,
-          mode: isVideoMode ? "video" : "slideshow",
-        }),
-      });
-      if (!resp.ok) throw new Error("Search failed");
-      const data = await resp.json();
+    // Kick off all source fetches in parallel and update state as each settles.
+    await Promise.all(
+      sourcesToQuery.map(async (src) => {
+        try {
+          const resp = await fetch("/api/media-sourcing/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              query: q,
+              video_query: slide?.video_query || q,
+              slide_id: slideId,
+              mode: isVideoMode ? "video" : "slideshow",
+              source: src,
+            }),
+            signal: aborter.signal,
+          });
+          if (!resp.ok) throw new Error(`${src} failed`);
+          const data = await resp.json();
 
-      setSlideMedia((prev) =>
-        prev.map((sm) =>
-          sm.slide_id === slideId
-            ? { ...sm, images: data.images || [], videos: data.videos || [], loading: false, searched: true }
-            : sm
-        )
-      );
-    } catch {
-      setSlideMedia((prev) =>
-        prev.map((sm) => (sm.slide_id === slideId ? { ...sm, loading: false, searched: true } : sm))
-      );
-    }
+          // Stale-response guard.
+          if (searchTokens.current[slideId] !== myToken) return;
+
+          setSlideMedia((prev) =>
+            prev.map((sm) => {
+              if (sm.slide_id !== slideId) return sm;
+              const newImages = [...sm.images, ...(data.images || [])];
+              const newVideos = [...sm.videos, ...(data.videos || [])];
+              const nextStatus = { ...sm.sourceStatus, [src]: "done" as SourceStatus };
+              const stillLoading = Object.values(nextStatus).some((s) => s === "loading");
+              return { ...sm, images: newImages, videos: newVideos, sourceStatus: nextStatus, loading: stillLoading };
+            })
+          );
+        } catch (err) {
+          if ((err as Error)?.name === "AbortError") return;
+          if (searchTokens.current[slideId] !== myToken) return;
+          setSlideMedia((prev) =>
+            prev.map((sm) => {
+              if (sm.slide_id !== slideId) return sm;
+              const nextStatus = { ...sm.sourceStatus, [src]: "error" as SourceStatus };
+              const stillLoading = Object.values(nextStatus).some((s) => s === "loading");
+              return { ...sm, sourceStatus: nextStatus, loading: stillLoading };
+            })
+          );
+        }
+      })
+    );
   }, [slides, isVideoMode]);
 
   const searchAll = useCallback(async () => {
@@ -164,16 +219,30 @@ export default function MediaSourcingPage() {
 
   const selectMedia = (slideId: number, media: MediaResult) => {
     setSlideMedia((prev) =>
-      prev.map((sm) => (sm.slide_id === slideId ? { ...sm, selected: media, custom: null } : sm))
+      prev.map((sm) => {
+        if (sm.slide_id !== slideId) return sm;
+        const alreadySelected = sm.selected.some((s) => s.id === media.id);
+        let next: MediaResult[];
+        if (alreadySelected) {
+          // Deselect
+          next = sm.selected.filter((s) => s.id !== media.id);
+        } else if (sm.selected.length >= 3) {
+          // At max — replace the oldest selection
+          next = [...sm.selected.slice(1), media];
+        } else {
+          // Add
+          next = [...sm.selected, media];
+        }
+        return { ...sm, selected: next, custom: null };
+      })
     );
-    autoAdvance(slideId);
   };
 
   const autoAdvance = (currentId: number) => {
     const idx = slides.findIndex((s) => s.id === currentId);
     for (let i = idx + 1; i < slides.length; i++) {
       const sm = slideMedia.find((m) => m.slide_id === slides[i].id);
-      if (sm && !sm.selected && !sm.custom) {
+      if (sm && sm.selected.length === 0 && !sm.custom) {
         const nextId = slides[i].id;
         setExpandedSlide(nextId);
         if (!sm.searched) searchSlide(nextId);
@@ -187,7 +256,7 @@ export default function MediaSourcingPage() {
     if (!file) return;
     setSlideMedia((prev) =>
       prev.map((sm) =>
-        sm.slide_id === slideId ? { ...sm, selected: null, custom: { url: URL.createObjectURL(file), name: file.name } } : sm
+        sm.slide_id === slideId ? { ...sm, selected: [], custom: { url: URL.createObjectURL(file), name: file.name } } : sm
       )
     );
     autoAdvance(slideId);
@@ -198,10 +267,13 @@ export default function MediaSourcingPage() {
   const buildExportLines = () => {
     return slides.map((slide) => {
       const sm = slideMedia.find((m) => m.slide_id === slide.id);
-      const mediaUrl = sm?.selected?.full_url || sm?.custom?.url || "";
+      // Use page_url (show page with credits) for export, fall back to full_url (CDN)
+      const mediaUrls = sm?.selected?.length
+        ? sm.selected.map((s) => s.page_url || s.full_url)
+        : sm?.custom?.url ? [sm.custom.url] : [];
       const duration = slide.estimated_duration_sec || 0;
       const timeRange = duration > 0 ? ` 0:00 to ${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")}` : "";
-      return { text: slide.text, url: mediaUrl, timeRange };
+      return { text: slide.text, urls: mediaUrls, timeRange };
     });
   };
 
@@ -218,7 +290,7 @@ export default function MediaSourcingPage() {
 
   const handleExport = () => {
     const lines = buildExportLines();
-    const content = lines.map((l) => `${l.text}\n${l.url}${l.timeRange}`).join("\n\n");
+    const content = lines.map((l) => `${l.text}\n${l.urls.map((u, i) => `  [${i + 1}] ${u}`).join("\n")}${l.timeRange}`).join("\n\n");
     triggerDownload(new Blob([content], { type: "text/plain" }), `media-sourcing-${Date.now()}.txt`);
     setPhase("export");
   };
@@ -232,11 +304,17 @@ export default function MediaSourcingPage() {
         subject: slide.subject,
         image_query: slide.image_query,
         ...(isVideoMode ? { video_query: slide.video_query, estimated_duration_sec: slide.estimated_duration_sec } : {}),
-        selected_media: sm?.selected
-          ? { url: sm.selected.full_url, source: sm.selected.source, author: sm.selected.author, title: sm.selected.title }
+        selected_media: sm?.selected?.length
+          ? sm.selected.map((s) => ({
+              url: s.full_url,
+              page_url: s.page_url || s.full_url,
+              source: s.source,
+              author: s.author,
+              title: s.title,
+            }))
           : sm?.custom
-          ? { url: sm.custom.url, source: "Custom", author: "User upload" }
-          : null,
+          ? [{ url: sm.custom.url, page_url: sm.custom.url, source: "Custom", author: "User upload" }]
+          : [],
       };
     });
     triggerDownload(new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" }), `media-sourcing-${Date.now()}.json`);
@@ -403,7 +481,7 @@ export default function MediaSourcingPage() {
             {slides.map((slide, idx) => {
               const sm = slideMedia.find((m) => m.slide_id === slide.id)!;
               const isExpanded = expandedSlide === slide.id;
-              const hasSelection = !!sm?.selected || !!sm?.custom;
+              const hasSelection = (sm?.selected?.length ?? 0) > 0 || !!sm?.custom;
 
               return (
                 <Card key={slide.id} flush className="overflow-hidden">
@@ -430,13 +508,27 @@ export default function MediaSourcingPage() {
                           <Badge variant="duration">{slide.estimated_duration_sec}s</Badge>
                         )}
                         {hasSelection && (
-                          <Badge variant="success">{sm.selected?.source || "Custom"}</Badge>
+                          <Badge variant="success">
+                            {sm.selected.length > 0
+                              ? `${sm.selected.length} selected`
+                              : "Custom"}
+                          </Badge>
                         )}
                       </div>
                     </div>
                     {hasSelection && (
-                      <div className="w-14 h-10 rounded overflow-hidden bg-gray-100 shrink-0">
-                        <img src={sm.selected?.thumbnail || sm.custom?.url || ""} alt="" className="w-full h-full object-cover" />
+                      <div className="flex gap-1 shrink-0">
+                        {sm.selected.length > 0
+                          ? sm.selected.map((sel) => (
+                              <div key={sel.id} className="w-10 h-8 rounded overflow-hidden bg-gray-100">
+                                <img src={sel.thumbnail} alt="" className="w-full h-full object-cover" />
+                              </div>
+                            ))
+                          : sm.custom && (
+                              <div className="w-14 h-10 rounded overflow-hidden bg-gray-100">
+                                <img src={sm.custom.url} alt="" className="w-full h-full object-cover" />
+                              </div>
+                            )}
                       </div>
                     )}
                     {isExpanded ? <ChevronUp size={16} className="text-gray-400" /> : <ChevronDown size={16} className="text-gray-400" />}
@@ -484,87 +576,162 @@ export default function MediaSourcingPage() {
                         </Button>
                       </div>
 
-                      {/* Loading */}
-                      {sm.loading && (
-                        <div className="flex items-center justify-center py-8 gap-3">
-                          <Spinner size={24} />
-                          <span className="text-sm text-gray-500">Searching Google & Firecrawl...</span>
-                        </div>
-                      )}
-
-                      {/* Results */}
-                      {!sm.loading && sm.searched && (
+                      {/* Results — one column per source, with skeletons for sources still loading */}
+                      {sm.searched && (
                         <>
-                          {sm.images.length === 0 && sm.videos.length === 0 ? (
-                            <div className="text-center py-6 text-sm text-gray-400">No results found. Try editing the search query.</div>
-                          ) : (
-                            <div className={`mb-3 ${isVideoMode && sm.videos.length > 0 ? "grid grid-cols-2 gap-4" : ""}`}>
-                              {/* Images column */}
-                              <div>
-                                <div className="flex items-center gap-2 mb-2">
-                                  <ImageIcon size={13} className="text-indigo-500" />
-                                  <span className="text-xs font-semibold text-gray-700">{sm.images.length} images</span>
-                                  <span className="text-[10px] text-gray-400">
-                                    ({sm.images.filter(i => i.source === "Google").length} Google, {sm.images.filter(i => i.source === "Firecrawl").length} Firecrawl)
-                                  </span>
-                                </div>
-                                <div className={`grid ${isVideoMode ? "grid-cols-3" : "grid-cols-5"} gap-1.5 max-h-[420px] overflow-y-auto pr-1`}>
-                                  {sm.images.map((img) => {
-                                    const isSelected = sm.selected?.id === img.id;
-                                    return (
-                                      <div
-                                        key={img.id}
-                                        onClick={() => selectMedia(slide.id, img)}
-                                        className={`relative rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${
-                                          isSelected ? "border-indigo-500 shadow-md" : "border-transparent hover:border-gray-300"
-                                        }`}
-                                      >
-                                        <div className="aspect-[4/3] bg-gray-100">
-                                          <img
-                                            src={img.thumbnail} alt={img.title || img.source}
-                                            className="w-full h-full object-cover" loading="lazy"
-                                            onError={(e) => { (e.target as HTMLImageElement).src = `https://picsum.photos/seed/${img.id}/400/300`; }}
-                                          />
-                                        </div>
-                                        <div className="absolute top-1 left-1 flex gap-0.5">
-                                          <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-black/60 text-white">{img.source}</span>
-                                          {img.width >= 1920 && (
-                                            <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-green-500/80 text-white">HD</span>
-                                          )}
-                                        </div>
-                                        {isSelected && (
-                                          <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-indigo-500 flex items-center justify-center">
-                                            <Check size={9} className="text-white" />
-                                          </div>
-                                        )}
-                                        <div className="px-1 py-0.5">
-                                          <p className="text-[8px] text-gray-600 truncate m-0">{img.title || img.author}</p>
-                                        </div>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              </div>
+                          {/* Selection counter */}
+                          <div className="flex items-center gap-2 mb-2 flex-wrap">
+                            <ImageIcon size={13} className="text-indigo-500" />
+                            <span className="text-xs font-semibold text-gray-700">{sm.images.length} images</span>
+                            <span className="text-[10px] text-gray-400 ml-1">Select 1–3 images</span>
+                            {sm.selected.length > 0 && (
+                              <Badge variant="success">{sm.selected.length}/3 selected</Badge>
+                            )}
+                            {sm.loading && (
+                              <span className="text-[10px] text-indigo-500 flex items-center gap-1 ml-auto">
+                                <Spinner size={10} />
+                                {Object.values(sm.sourceStatus).filter((s) => s === "loading").length} source(s) loading…
+                              </span>
+                            )}
+                          </div>
 
-                              {/* Videos column (video mode only) */}
-                              {isVideoMode && sm.videos.length > 0 && (
-                                <div>
+                          {/* Source columns — one per configured source */}
+                          <div className="flex gap-3 overflow-x-auto pb-2 max-h-[480px]">
+                            {(() => {
+                              const groups: Record<string, MediaResult[]> = {};
+                              for (const img of sm.images) {
+                                if (!groups[img.source]) groups[img.source] = [];
+                                groups[img.source].push(img);
+                              }
+
+                              const sourceColors: Record<string, string> = {
+                                Imagn: "bg-orange-500",
+                                Imago: "bg-purple-500",
+                                Google: "bg-blue-500",
+                                "Google CC": "bg-cyan-500",
+                                Firecrawl: "bg-amber-500",
+                                Pexels: "bg-emerald-500",
+                              };
+
+                              return IMAGE_SOURCES.map((source) => {
+                                const imgs = groups[source] || [];
+                                const status = sm.sourceStatus[source] ?? "idle";
+                                const isLoading = status === "loading";
+                                const isError = status === "error";
+                                return (
+                                  <div key={source} className="flex-shrink-0" style={{ minWidth: "140px", maxWidth: "180px" }}>
+                                    {/* Source header */}
+                                    <div className="flex items-center gap-1.5 mb-1.5 sticky top-0 bg-white z-10 pb-1">
+                                      <span className={`w-2 h-2 rounded-full ${sourceColors[source] || "bg-gray-400"} ${isLoading ? "animate-pulse" : ""}`} />
+                                      <span className="text-[11px] font-bold text-gray-800 truncate">{source}</span>
+                                      {isLoading ? (
+                                        <Spinner size={10} />
+                                      ) : isError ? (
+                                        <span className="text-[9px] text-red-400">error</span>
+                                      ) : (
+                                        <span className="text-[9px] text-gray-400">{imgs.length}</span>
+                                      )}
+                                    </div>
+                                    {/* Skeletons while loading, or images once done */}
+                                    <div className="space-y-1.5 overflow-y-auto max-h-[420px] pr-0.5">
+                                      {isLoading && imgs.length === 0 ? (
+                                        Array.from({ length: 4 }).map((_, i) => (
+                                          <div key={i} className="rounded-lg overflow-hidden border-2 border-transparent">
+                                            <div className="aspect-[4/3] bg-gray-100 animate-pulse" />
+                                            <div className="px-1 py-0.5">
+                                              <div className="h-2 w-3/4 bg-gray-100 rounded animate-pulse" />
+                                            </div>
+                                          </div>
+                                        ))
+                                      ) : !isLoading && imgs.length === 0 ? (
+                                        <div className="text-[10px] text-gray-400 text-center py-4">
+                                          {isError ? "Failed" : "No results"}
+                                        </div>
+                                      ) : (
+                                        imgs.map((img) => {
+                                          const selIdx = sm.selected.findIndex((s) => s.id === img.id);
+                                          const isSelected = selIdx >= 0;
+                                          const sourceUrl = img.page_url || img.full_url;
+                                          return (
+                                            <div
+                                              key={img.id}
+                                              className={`relative rounded-lg overflow-hidden border-2 transition-all ${
+                                                isSelected ? "border-indigo-500 shadow-md ring-1 ring-indigo-300" : "border-transparent hover:border-gray-300"
+                                              }`}
+                                            >
+                                              <div
+                                                className="aspect-[4/3] bg-gray-100 cursor-pointer"
+                                                onClick={() => selectMedia(slide.id, img)}
+                                              >
+                                                <img
+                                                  src={img.thumbnail} alt={img.title || img.source}
+                                                  className="w-full h-full object-cover" loading="lazy"
+                                                  onError={(e) => { (e.target as HTMLImageElement).src = `https://picsum.photos/seed/${img.id}/400/300`; }}
+                                                />
+                                              </div>
+                                              {img.width >= 1920 && (
+                                                <div className="absolute top-1 left-1">
+                                                  <span className="px-1 py-0.5 rounded text-[8px] font-semibold bg-green-500/80 text-white">HD</span>
+                                                </div>
+                                              )}
+                                              {isSelected && (
+                                                <div className="absolute top-1 right-1 w-5 h-5 rounded-full bg-indigo-500 flex items-center justify-center text-[10px] font-bold text-white">
+                                                  {selIdx + 1}
+                                                </div>
+                                              )}
+                                              <div className="px-1 py-0.5 flex items-center gap-1">
+                                                <p className="text-[8px] text-gray-600 truncate m-0 flex-1">{img.title || img.author}</p>
+                                                <a
+                                                  href={sourceUrl}
+                                                  target="_blank"
+                                                  rel="noopener noreferrer"
+                                                  onClick={(e) => e.stopPropagation()}
+                                                  className="shrink-0 p-0.5 rounded hover:bg-gray-100 text-gray-400 hover:text-indigo-500 transition-colors"
+                                                  title="Open source page (verify credits)"
+                                                >
+                                                  <ExternalLink size={10} />
+                                                </a>
+                                              </div>
+                                            </div>
+                                          );
+                                        })
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              });
+                            })()}
+                          </div>
+
+                          {/* Videos row (video mode only) */}
+                          {isVideoMode && (sm.videos.length > 0 || sm.sourceStatus["Google Video"] === "loading") && (
+                                <div className="mt-3 pt-3 border-t border-gray-100">
                                   <div className="flex items-center gap-2 mb-2">
                                     <Film size={13} className="text-red-500" />
                                     <span className="text-xs font-semibold text-gray-700">{sm.videos.length} videos</span>
+                                    {sm.sourceStatus["Google Video"] === "loading" && <Spinner size={10} />}
                                   </div>
-                                  <div className="grid grid-cols-2 gap-1.5 max-h-[420px] overflow-y-auto pr-1">
+                                  <div className="grid grid-cols-4 gap-1.5 max-h-[200px] overflow-y-auto pr-1">
+                                    {sm.sourceStatus["Google Video"] === "loading" && sm.videos.length === 0 &&
+                                      Array.from({ length: 4 }).map((_, i) => (
+                                        <div key={`vs-${i}`} className="rounded-lg overflow-hidden">
+                                          <div className="aspect-video bg-gray-100 animate-pulse" />
+                                        </div>
+                                      ))}
                                     {sm.videos.map((vid) => {
-                                      const isSelected = sm.selected?.id === vid.id;
+                                      const isSelected = sm.selected.some((s) => s.id === vid.id);
+                                      const vidUrl = vid.page_url || vid.full_url;
                                       return (
                                         <div
                                           key={vid.id}
-                                          onClick={() => selectMedia(slide.id, vid)}
-                                          className={`relative rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${
+                                          className={`relative rounded-lg overflow-hidden border-2 transition-all ${
                                             isSelected ? "border-indigo-500 shadow-md" : "border-transparent hover:border-gray-300"
                                           }`}
                                         >
-                                          <div className="aspect-video bg-gray-100">
+                                          <div
+                                            className="aspect-video bg-gray-100 cursor-pointer"
+                                            onClick={() => selectMedia(slide.id, vid)}
+                                          >
                                             <img
                                               src={vid.thumbnail} alt={vid.title || "Video"}
                                               className="w-full h-full object-cover" loading="lazy"
@@ -579,8 +746,18 @@ export default function MediaSourcingPage() {
                                               <Check size={9} className="text-white" />
                                             </div>
                                           )}
-                                          <div className="px-1 py-0.5">
-                                            <p className="text-[8px] text-gray-600 truncate m-0">{vid.title || vid.author}</p>
+                                          <div className="px-1 py-0.5 flex items-center gap-1">
+                                            <p className="text-[8px] text-gray-600 truncate m-0 flex-1">{vid.title || vid.author}</p>
+                                            <a
+                                              href={vidUrl}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              onClick={(e) => e.stopPropagation()}
+                                              className="shrink-0 p-0.5 rounded hover:bg-gray-100 text-gray-400 hover:text-indigo-500 transition-colors"
+                                              title="Open source page"
+                                            >
+                                              <ExternalLink size={10} />
+                                            </a>
                                           </div>
                                         </div>
                                       );
@@ -588,8 +765,6 @@ export default function MediaSourcingPage() {
                                   </div>
                                 </div>
                               )}
-                            </div>
-                          )}
                         </>
                       )}
 
@@ -606,7 +781,7 @@ export default function MediaSourcingPage() {
                         {hasSelection && (
                           <button
                             onClick={() => setSlideMedia((prev) =>
-                              prev.map((sm2) => sm2.slide_id === slide.id ? { ...sm2, selected: null, custom: null } : sm2)
+                              prev.map((sm2) => sm2.slide_id === slide.id ? { ...sm2, selected: [], custom: null } : sm2)
                             )}
                             className="p-1.5 text-gray-400 hover:text-red-500 rounded"
                           ><X size={14} /></button>
@@ -649,15 +824,20 @@ export default function MediaSourcingPage() {
                 {buildExportLines().map((line, i) => (
                   <div key={i} className="p-3 rounded-lg bg-gray-50 border border-gray-100">
                     <p className="text-sm text-gray-800 leading-relaxed">{line.text}</p>
-                    {line.url ? (
-                      <a
-                        href={line.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs text-indigo-500 hover:text-indigo-700 mt-1 block truncate"
-                      >
-                        {line.url}{line.timeRange}
-                      </a>
+                    {line.urls.length > 0 ? (
+                      <div className="mt-1 space-y-0.5">
+                        {line.urls.map((url, j) => (
+                          <a
+                            key={j}
+                            href={url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-indigo-500 hover:text-indigo-700 block truncate"
+                          >
+                            [{j + 1}] {url}{j === 0 ? line.timeRange : ""}
+                          </a>
+                        ))}
+                      </div>
                     ) : (
                       <span className="text-xs text-gray-400 mt-1 block">No media selected</span>
                     )}

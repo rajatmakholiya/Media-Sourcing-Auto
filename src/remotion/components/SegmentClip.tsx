@@ -83,6 +83,8 @@ export const SegmentClip: React.FC<Props> = ({
             src={segment.media.url}
             style={mediaStyle}
             muted
+            {...(segment.media.clip_in != null ? { startFrom: Math.round(segment.media.clip_in * fps) } : {})}
+            {...(segment.media.clip_out != null ? { endAt: Math.round(segment.media.clip_out * fps) } : {})}
           />
         ) : (
           <Img

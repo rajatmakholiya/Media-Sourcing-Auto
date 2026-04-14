@@ -20,6 +20,9 @@ import {
   Download,
   Copy,
   ExternalLink,
+  Scissors,
+  Play,
+  Pause,
 } from "lucide-react";
 
 // --- Types ---
@@ -45,6 +48,8 @@ type SegmentMedia = {
   videos: MediaResult[];
   selected: MediaResult | null;
   custom: { type: "upload" | "url"; url: string; name: string } | null;
+  clip_in?: number;   // seconds — trim start (video only)
+  clip_out?: number;  // seconds — trim end (video only)
   loading: boolean;
   searched: boolean;
   activeTab: "images" | "videos";
@@ -53,9 +58,357 @@ type SegmentMedia = {
 export type MediaSelectionData = {
   selections: {
     segment_id: number;
-    media: MediaResult | { id: string; type: string; url: string; source: string };
+    media: MediaResult | { id: string; type: string; url: string; source: string; clip_in?: number; clip_out?: number };
   }[];
 };
+
+// --- Video Preview Modal ---
+
+function VideoPreviewModal({
+  media,
+  dialogueDuration,
+  initialClipIn,
+  initialClipOut,
+  onConfirm,
+  onCancel,
+}: {
+  media: MediaResult;
+  dialogueDuration: number;
+  initialClipIn: number;
+  initialClipOut: number;
+  onConfirm: (clipIn: number, clipOut: number) => void;
+  onCancel: () => void;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [videoDuration, setVideoDuration] = useState<number>(media.duration_sec || 0);
+  const [clipIn, setClipIn] = useState(initialClipIn);
+  const [clipOut, setClipOut] = useState(initialClipOut);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [videoError, setVideoError] = useState(false);
+  const animRef = useRef<number | null>(null);
+  const playingRef = useRef(false);
+
+  // Detect YouTube / embeddable platform URLs
+  const ytEmbedUrl = (() => {
+    const url = media.preview_url || media.full_url || "";
+    const m = url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&?/]+)/);
+    return m ? `https://www.youtube.com/embed/${m[1]}?autoplay=0&rel=0` : null;
+  })();
+
+  // YouTube → iframe directly (never try <video> for yt links)
+  // Non-YouTube → <video>, fallback to external link on error
+  const showMode = ytEmbedUrl ? "iframe" : videoError ? "fallback" : "video";
+
+  const formatTime = (sec: number) => {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    const ms = Math.floor((sec % 1) * 10);
+    return `${m}:${String(s).padStart(2, "0")}.${ms}`;
+  };
+
+  const clipDuration = Math.round((clipOut - clipIn) * 100) / 100;
+  const durationError = clipDuration > dialogueDuration;
+
+  // Editable input state (string while typing, parsed on blur)
+  const [inInput, setInInput] = useState(formatTime(initialClipIn));
+  const [outInput, setOutInput] = useState(formatTime(initialClipOut));
+
+  // Keep inputs in sync when clip values change programmatically
+  useEffect(() => { setInInput(formatTime(clipIn)); }, [clipIn]);
+  useEffect(() => { setOutInput(formatTime(clipOut)); }, [clipOut]);
+
+  const parseTime = (s: string): number | null => {
+    const m1 = s.match(/^(\d+):(\d{1,2})(?:\.(\d+))?$/);
+    if (m1) {
+      return parseInt(m1[1]) * 60 + parseInt(m1[2]) + (m1[3] ? parseFloat(`0.${m1[3]}`) : 0);
+    }
+    const m2 = s.match(/^(\d+(?:\.\d+)?)$/);
+    return m2 ? parseFloat(m2[1]) : null;
+  };
+
+  const commitInInput = () => {
+    const v = parseTime(inInput);
+    if (v !== null) handleClipInChange(v);
+    else setInInput(formatTime(clipIn));
+  };
+
+  const commitOutInput = () => {
+    const v = parseTime(outInput);
+    if (v !== null) handleClipOutChange(v);
+    else setOutInput(formatTime(clipOut));
+  };
+
+  // When video metadata loads, get real duration
+  const handleLoadedMetadata = () => {
+    if (videoRef.current) {
+      const dur = videoRef.current.duration;
+      if (isFinite(dur) && dur > 0) {
+        setVideoDuration(dur);
+        // Adjust clipOut if it exceeds actual duration
+        if (clipOut > dur) {
+          setClipOut(Math.min(dur, clipIn + dialogueDuration));
+        }
+      }
+    }
+  };
+
+  // Sync playback position loop
+  useEffect(() => {
+    const tick = () => {
+      if (videoRef.current) {
+        const t = videoRef.current.currentTime;
+        setCurrentTime(t);
+        // Stop when reaching clipOut — only if actually playing
+        if (playingRef.current && t >= clipOut) {
+          playingRef.current = false;
+          videoRef.current.pause();
+          videoRef.current.currentTime = clipIn;
+          setIsPlaying(false);
+        }
+      }
+      animRef.current = requestAnimationFrame(tick);
+    };
+    animRef.current = requestAnimationFrame(tick);
+    return () => { if (animRef.current) cancelAnimationFrame(animRef.current); };
+  }, [clipIn, clipOut]);
+
+  const togglePlay = () => {
+    if (!videoRef.current) return;
+    if (playingRef.current) {
+      playingRef.current = false;
+      videoRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      // Start from clipIn if before it or past clipOut
+      if (videoRef.current.currentTime < clipIn || videoRef.current.currentTime >= clipOut) {
+        videoRef.current.currentTime = clipIn;
+      }
+      playingRef.current = true;
+      setIsPlaying(true);
+      videoRef.current.play().catch(() => {
+        playingRef.current = false;
+        setIsPlaying(false);
+      });
+    }
+  };
+
+  const handleClipInChange = (val: number) => {
+    const v = Math.max(0, Math.min(val, clipOut - 0.1));
+    setClipIn(Math.round(v * 100) / 100);
+    if (videoRef.current) videoRef.current.currentTime = v;
+  };
+
+  const handleClipOutChange = (val: number) => {
+    const v = Math.max(clipIn + 0.1, Math.min(val, videoDuration));
+    setClipOut(Math.round(v * 100) / 100);
+  };
+
+
+
+  // Compute the trim region as percentages for the visual bar
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onCancel}>
+      <div
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl mx-4 overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-gray-100">
+          <div className="flex items-center gap-2">
+            <Scissors size={15} className="text-indigo-500" />
+            <span className="text-sm font-semibold text-gray-900">Trim video clip</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Badge variant="duration">Dialogue: {dialogueDuration}s</Badge>
+            <button onClick={onCancel} className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600">
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+
+        {/* Video player */}
+        <div className="relative bg-black aspect-video">
+          {showMode === "video" && (
+            <>
+              <video
+                ref={videoRef}
+                src={media.preview_url || media.full_url}
+                className="w-full h-full object-contain"
+                onLoadedMetadata={handleLoadedMetadata}
+                onError={() => setVideoError(true)}
+                onEnded={() => { playingRef.current = false; setIsPlaying(false); }}
+                preload="metadata"
+                playsInline
+              />
+              <button
+                onClick={togglePlay}
+                className="absolute inset-0 flex items-center justify-center bg-black/10 hover:bg-black/20 transition-colors"
+              >
+                <div className="w-12 h-12 rounded-full bg-white/90 flex items-center justify-center shadow-lg">
+                  {isPlaying ? <Pause size={18} className="text-gray-800" /> : <Play size={18} className="text-gray-800 ml-0.5" />}
+                </div>
+              </button>
+            </>
+          )}
+          {showMode === "iframe" && (
+            <iframe
+              src={ytEmbedUrl!}
+              className="w-full h-full"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowFullScreen
+            />
+          )}
+          {showMode === "fallback" && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-gray-400">
+              <Film size={32} />
+              <span className="text-sm">Preview not available in browser</span>
+              <a
+                href={media.preview_url || media.full_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300 underline"
+              >
+                <ExternalLink size={12} /> Open video externally
+              </a>
+              <span className="text-xs text-gray-500 mt-1">Set trim points manually below</span>
+            </div>
+          )}
+        </div>
+
+        {/* Clip stamp buttons — only when direct <video> works */}
+        {showMode === "video" && (
+          <div className="px-5 pt-3 pb-1 flex items-center gap-2">
+            <button
+              onClick={() => handleClipInChange(currentTime)}
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 text-xs font-semibold text-gray-700 hover:text-indigo-700 transition-colors"
+            >
+              <Scissors size={12} /> Mark In — <span className="font-mono">{formatTime(currentTime)}</span>
+            </button>
+            <button
+              onClick={() => handleClipOutChange(currentTime)}
+              className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 hover:border-indigo-400 hover:bg-indigo-50 text-xs font-semibold text-gray-700 hover:text-indigo-700 transition-colors"
+            >
+              <Scissors size={12} /> Mark Out — <span className="font-mono">{formatTime(currentTime)}</span>
+            </button>
+          </div>
+        )}
+
+        {/* For iframe (YouTube) — always show external link as escape hatch */}
+        {showMode === "iframe" && (
+          <div className="px-5 pt-2 pb-1 flex items-center justify-between">
+            <span className="text-[10px] text-gray-400">Video blocked? Watch externally and enter timestamps below</span>
+            <a
+              href={media.preview_url || media.full_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1 text-xs text-indigo-500 hover:text-indigo-700 font-medium"
+            >
+              <ExternalLink size={12} /> Open in YouTube
+            </a>
+          </div>
+        )}
+
+        {/* Trim controls */}
+        <div className="px-5 py-4 space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            {/* Clip In */}
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Clip In</label>
+              <input
+                type="text"
+                value={inInput}
+                onChange={(e) => setInInput(e.target.value)}
+                onBlur={commitInInput}
+                onKeyDown={(e) => e.key === "Enter" && commitInInput()}
+                className="w-full font-mono text-sm text-center border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent bg-white"
+                placeholder="0:00.0"
+              />
+              <div className="grid grid-cols-4 gap-1">
+                {([-1, -0.1, 0.1, 1] as const).map((delta) => (
+                  <button
+                    key={delta}
+                    onClick={() => handleClipInChange(clipIn + delta)}
+                    className="text-[10px] font-mono py-1 rounded border border-gray-200 hover:bg-gray-50 hover:border-gray-300 text-gray-600 transition-colors"
+                  >
+                    {delta > 0 ? `+${delta}` : delta}s
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Clip Out */}
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-semibold text-gray-500 uppercase tracking-wide">Clip Out</label>
+              <input
+                type="text"
+                value={outInput}
+                onChange={(e) => setOutInput(e.target.value)}
+                onBlur={commitOutInput}
+                onKeyDown={(e) => e.key === "Enter" && commitOutInput()}
+                className="w-full font-mono text-sm text-center border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:border-transparent bg-white"
+                placeholder="0:00.0"
+              />
+              <div className="grid grid-cols-4 gap-1">
+                {([-1, -0.1, 0.1, 1] as const).map((delta) => (
+                  <button
+                    key={delta}
+                    onClick={() => handleClipOutChange(clipOut + delta)}
+                    className="text-[10px] font-mono py-1 rounded border border-gray-200 hover:bg-gray-50 hover:border-gray-300 text-gray-600 transition-colors"
+                  >
+                    {delta > 0 ? `+${delta}` : delta}s
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Duration info */}
+          <div className="flex items-center gap-3 text-xs pt-0.5">
+            <span className="text-gray-500">Clip: <strong className={durationError ? "text-red-600" : "text-indigo-600"}>{clipDuration.toFixed(1)}s</strong></span>
+            <span className="text-gray-300">|</span>
+            <span className="text-gray-500">Dialogue: <strong className="text-gray-700">{dialogueDuration}s</strong></span>
+            <span className="text-gray-300">|</span>
+            <span className="text-gray-500">Video: <strong className="text-gray-700">{videoDuration > 0 ? videoDuration.toFixed(1) : "—"}s</strong></span>
+            {showMode === "video" && (
+              <>
+                <span className="text-gray-300">|</span>
+                <span className="text-gray-500">Now: <strong className="text-gray-700 font-mono">{formatTime(currentTime)}</strong></span>
+              </>
+            )}
+          </div>
+
+          {/* Duration error */}
+          {durationError && (
+            <div className="flex items-center gap-2 p-2.5 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
+              <AlertCircle size={14} className="shrink-0" />
+              <span>
+                Clip ({clipDuration.toFixed(1)}s) exceeds dialogue ({dialogueDuration}s). Trim to {dialogueDuration}s or less.
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Footer actions */}
+        <div className="flex items-center justify-between px-5 py-3 border-t border-gray-100 bg-gray-50">
+          <div className="text-[10px] text-gray-400">
+            Video is streamed for preview — not downloaded until export
+          </div>
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={onCancel}>Cancel</Button>
+            <Button
+              onClick={() => onConfirm(clipIn, clipOut)}
+              disabled={durationError}
+            >
+              <Scissors size={13} /> Use this clip
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // --- Component ---
 
@@ -77,11 +430,19 @@ export default function MediaSelection({
       videos: [],
       selected: null,
       custom: null,
+      clip_in: undefined,
+      clip_out: undefined,
       loading: false,
       searched: false,
       activeTab: "images" as const,
     }))
   );
+  // Video preview modal state
+  const [previewModal, setPreviewModal] = useState<{
+    segId: number;
+    media: MediaResult;
+    dialogueDuration: number;
+  } | null>(null);
   const [expandedSeg, setExpandedSeg] = useState<number | null>(
     segments.segments[0]?.id ?? null
   );
@@ -164,10 +525,25 @@ export default function MediaSelection({
   }, []);
 
   // --- Selection ---
-  const selectMedia = (segId: number, media: MediaResult) => {
+  const selectMedia = (segId: number, media: MediaResult, clipIn?: number, clipOut?: number) => {
     setSegmentMedia((prev) =>
-      prev.map((sm) => (sm.segment_id === segId ? { ...sm, selected: media, custom: null } : sm))
+      prev.map((sm) => (sm.segment_id === segId ? { ...sm, selected: media, custom: null, clip_in: clipIn, clip_out: clipOut } : sm))
     );
+  };
+
+  // Open video preview modal instead of directly selecting
+  const openVideoPreview = (segId: number, media: MediaResult) => {
+    const seg = segments.segments.find((s) => s.id === segId);
+    const voResult = voiceover.results.find((r) => r.segment_id === segId);
+    const dialogueDuration = voResult?.duration_sec || seg?.estimated_duration_sec || 5;
+    setPreviewModal({ segId, media, dialogueDuration });
+  };
+
+  const handleVideoClipConfirm = (clipIn: number, clipOut: number) => {
+    if (!previewModal) return;
+    selectMedia(previewModal.segId, previewModal.media, clipIn, clipOut);
+    autoAdvance(previewModal.segId);
+    setPreviewModal(null);
   };
 
   const handleUpload = (segId: number, e: React.ChangeEvent<HTMLInputElement>) => {
@@ -197,7 +573,7 @@ export default function MediaSelection({
 
   const clearSelection = (segId: number) => {
     setSegmentMedia((prev) =>
-      prev.map((sm) => (sm.segment_id === segId ? { ...sm, selected: null, custom: null } : sm))
+      prev.map((sm) => (sm.segment_id === segId ? { ...sm, selected: null, custom: null, clip_in: undefined, clip_out: undefined } : sm))
     );
   };
 
@@ -274,24 +650,20 @@ export default function MediaSelection({
     // First, download the URL list as a text file
     downloadUrlsAsTextFile();
 
-    // Then download each media file
+    // Then download each media file via server proxy (bypasses CORS)
     for (const item of list) {
       if (!item.url) continue;
       try {
-        const resp = await fetch(item.url);
+        const proxyUrl = `/api/media-sourcing/proxy-download?url=${encodeURIComponent(item.url)}`;
+        const resp = await fetch(proxyUrl);
+        if (!resp.ok) throw new Error(`${resp.status}`);
         const blob = await resp.blob();
         const ext = item.type === "video" ? "mp4" : "jpg";
-        const a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = `segment-${item.segment_id}.${ext}`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(a.href);
+        triggerDownload(blob, `segment-${item.segment_id}.${ext}`);
         // Small delay between downloads so browser doesn't block them
-        await new Promise((r) => setTimeout(r, 300));
+        await new Promise((r) => setTimeout(r, 500));
       } catch {
-        // If CORS blocks the fetch, fall back to opening in new tab
+        // If proxy also fails, open in new tab
         window.open(item.url, "_blank");
       }
     }
@@ -305,7 +677,11 @@ export default function MediaSelection({
       .map((sm) => ({
         segment_id: sm.segment_id,
         media: sm.selected
-          ? sm.selected
+          ? {
+              ...sm.selected,
+              ...(sm.clip_in != null ? { clip_in: sm.clip_in } : {}),
+              ...(sm.clip_out != null ? { clip_out: sm.clip_out } : {}),
+            }
           : {
               id: `custom-${sm.segment_id}`,
               type: sm.custom!.url.match(/\.(mp4|webm|mov)/i) ? "video" : "image",
@@ -319,6 +695,20 @@ export default function MediaSelection({
   // --- Render ---
   return (
     <div className="space-y-4">
+      {/* Video Preview Modal */}
+      {previewModal && (
+        <VideoPreviewModal
+          media={previewModal.media}
+          dialogueDuration={previewModal.dialogueDuration}
+          initialClipIn={0}
+          initialClipOut={Math.min(
+            previewModal.dialogueDuration,
+            previewModal.media.duration_sec || previewModal.dialogueDuration
+          )}
+          onConfirm={handleVideoClipConfirm}
+          onCancel={() => setPreviewModal(null)}
+        />
+      )}
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
@@ -425,6 +815,12 @@ export default function MediaSelection({
                   {hasSelection && (
                     <Badge variant="success">
                       {sm.selected ? `${sm.selected.source} · ${sm.selected.type}` : `Custom ${sm.custom?.type}`}
+                    </Badge>
+                  )}
+                  {sm.clip_in != null && sm.clip_out != null && (
+                    <Badge variant="duration">
+                      <Scissors size={9} className="inline mr-0.5" />
+                      {sm.clip_in.toFixed(1)}s → {sm.clip_out.toFixed(1)}s
                     </Badge>
                   )}
                 </div>
@@ -540,7 +936,7 @@ export default function MediaSelection({
                             return (
                               <div
                                 key={media.id}
-                                onClick={() => { selectMedia(seg.id, media); autoAdvance(seg.id); }}
+                                onClick={() => openVideoPreview(seg.id, media)}
                                 className={`relative rounded-lg overflow-hidden cursor-pointer border-2 transition-all ${
                                   isSelected ? "border-indigo-500 shadow-md" : "border-transparent hover:border-gray-300"
                                 }`}
@@ -562,6 +958,12 @@ export default function MediaSelection({
                                       {Math.floor(media.duration_sec / 60)}:{String(Math.floor(media.duration_sec % 60)).padStart(2, "0")}
                                     </span>
                                   )}
+                                </div>
+                                {/* Scissors icon to indicate preview/trim */}
+                                <div className="absolute bottom-6 right-1">
+                                  <span className="px-1 py-0.5 rounded text-[9px] font-semibold bg-indigo-500/80 text-white flex items-center gap-0.5">
+                                    <Scissors size={8} /> Trim
+                                  </span>
                                 </div>
                                 {isSelected && (
                                   <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-indigo-500 flex items-center justify-center">

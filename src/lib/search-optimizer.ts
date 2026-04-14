@@ -28,6 +28,11 @@ const BLOCKED_DOMAINS = [
   "envato.com",
   "artgrid.io",
   "motionarray.com",
+  // Strictly prohibited — licensing issues
+  "reuters.com",
+  "reutersmedia.net",
+  "gettyimages.co",
+  "gettysportsmedia.com",
 ];
 
 export function isBlockedDomain(url: string): boolean {
@@ -42,7 +47,7 @@ const ABSTRACT_TERMS = new Set([
   "new", "modern", "together", "today", "world",
 ]);
 
-// Classify the keyword's visual domain
+// Classify the keyword's visual domain — covers all MSN content types
 function classifyKeyword(keyword: string): string[] {
   const kw = keyword.toLowerCase();
   const domains: string[] = [];
@@ -57,9 +62,9 @@ function classifyKeyword(keyword: string): string[] {
     domains.push("urban");
   if (/\b(health|medical|doctor|hospital|fitness|exercise|wellness)\b/.test(kw))
     domains.push("health");
-  if (/\b(food|cooking|recipe|restaurant|kitchen|meal)\b/.test(kw))
+  if (/\b(food|cooking|recipe|restaurant|kitchen|meal|chef|cuisine)\b/.test(kw))
     domains.push("food");
-  if (/\b(sport|game|athlete|football|basketball|soccer|running)\b/.test(kw))
+  if (/\b(sport|game|athlete|football|basketball|soccer|running|nfl|nba|mlb|nhl|tennis|golf|ufc|boxing|olympics)\b/.test(kw))
     domains.push("sports");
   if (/\b(education|school|university|learning|student|teacher|study)\b/.test(kw))
     domains.push("education");
@@ -67,12 +72,21 @@ function classifyKeyword(keyword: string): string[] {
     domains.push("creative");
   if (/\b(money|finance|invest|stock|crypto|bank|economy|market)\b/.test(kw))
     domains.push("finance");
+  // Entertainment / pop culture — movies, TV, celebrities, music
+  if (/\b(movie|film|actor|actress|celebrity|oscar|emmy|grammy|premiere|hollywood|netflix|disney|marvel|dc|series|tv show|streaming|award|concert|tour|album|singer|rapper|band|festival)\b/.test(kw))
+    domains.push("entertainment");
+  // Politics / government
+  if (/\b(election|president|congress|senate|politics|democrat|republican|vote|government|policy|white house|supreme court|campaign|legislation)\b/.test(kw))
+    domains.push("politics");
+  // Fashion / lifestyle
+  if (/\b(fashion|style|beauty|model|runway|designer|luxury|trend|lifestyle|travel|vacation)\b/.test(kw))
+    domains.push("lifestyle");
 
   if (domains.length === 0) domains.push("general");
   return domains;
 }
 
-// Domain-specific visual synonyms for better B-roll results
+// Domain-specific visual synonyms for better B-roll results — all MSN content types
 const DOMAIN_VISUAL_TERMS: Record<string, string[]> = {
   tech: ["computer screen code", "futuristic technology", "digital interface", "server room", "hands typing keyboard"],
   business: ["corporate office", "business meeting", "handshake deal", "whiteboard strategy", "professional workspace"],
@@ -84,6 +98,9 @@ const DOMAIN_VISUAL_TERMS: Record<string, string[]> = {
   education: ["classroom learning", "student studying", "university campus", "online learning", "books library"],
   creative: ["artist studio", "creative process", "design workspace", "music production", "film production"],
   finance: ["stock market trading", "financial charts", "bank vault", "cryptocurrency digital", "money business"],
+  entertainment: ["red carpet premiere", "movie scene cinematic", "celebrity event", "concert stage performance", "award ceremony"],
+  politics: ["capitol building", "press conference podium", "political rally crowd", "white house exterior", "voting election"],
+  lifestyle: ["fashion runway show", "luxury lifestyle", "travel destination scenic", "beauty portrait", "street style photography"],
   general: ["cinematic footage", "professional footage"],
 };
 
@@ -223,9 +240,18 @@ export function scoreResult(result: {
     else if (result.duration_sec > 300) score -= 10;  // Too long, likely a full video
   }
 
-  // Source quality bonus
-  if (result.source === "Pexels" || result.source === "Pixabay") score += 10; // Royalty-free, safe
+  // Source quality bonus — tiered by licensing safety
+  // Tier 1: Licensed editorial (you own the license)
+  if (result.source === "Imago" || result.source === "Imagn") score += 30;
+  // Tier 2: Google CC-filtered / free site targeted
+  if (result.source === "Google CC") score += 16;
+  if (result.source === "Google (Free Sites)") score += 14;
+  if (result.source === "Firecrawl Editorial") score += 14;
+  // Tier 3: Royalty-free stock
+  if (result.source === "Pexels") score += 12;
+  // Tier 4: General web search
   if (result.source === "Google") score += 5;
+  if (result.source === "Firecrawl") score += 3;
 
   // Platform bonus for videos
   if (result.platform === "YouTube") score += 5;

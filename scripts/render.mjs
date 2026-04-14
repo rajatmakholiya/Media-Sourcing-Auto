@@ -8,6 +8,7 @@ import { existsSync, createReadStream } from "fs";
 import path from "path";
 import http from "http";
 import { fileURLToPath } from "url";
+import { execFile } from "child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -61,22 +62,135 @@ async function main() {
   // STAGE 1: Download media assets
   // ============================================
   progress("downloading", 0);
-  const assetMap = new Map(); // segment_id -> { localFile, originalType }
+  const assetMap = new Map(); // segment_id -> { filename, isVideo }
+
+  // Check if yt-dlp is available (supports YouTube, Instagram, Twitter, Vimeo, TikTok, 1000+ sites)
+  const hasYtDlp = await new Promise((resolve) => {
+    execFile("yt-dlp", ["--version"], { timeout: 5000 }, (err) => resolve(!err));
+  });
+  if (hasYtDlp) {
+    console.error("[download] yt-dlp available — video platform URLs will be downloaded");
+  } else {
+    console.error("[download] yt-dlp not found — platform videos will be skipped. Install: brew install yt-dlp");
+  }
+
+  // Download video via yt-dlp (works with YouTube, Instagram, Twitter, Vimeo, TikTok, etc.)
+  async function downloadWithYtDlp(url, outputPath) {
+    return new Promise((resolve) => {
+      const args = [
+        "-f", "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "-o", outputPath,
+        "--no-playlist",
+        "--socket-timeout", "30",
+        url,
+      ];
+      execFile("yt-dlp", args, { timeout: 120000 }, (err, stdout, stderr) => {
+        if (err) {
+          console.error(`[yt-dlp] Failed for ${url}: ${err.message}`);
+          if (stderr) console.error(`[yt-dlp] stderr: ${stderr.slice(0, 500)}`);
+          resolve(null);
+        } else {
+          resolve(outputPath);
+        }
+      });
+    });
+  }
+
+  // Scrape HTML page for embedded video source URLs
+  async function scrapeVideoUrl(pageUrl) {
+    try {
+      const resp = await fetch(pageUrl, {
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        redirect: "follow",
+      });
+      if (!resp.ok) return null;
+      const contentType = resp.headers.get("content-type") || "";
+      if (!contentType.includes("text/html")) return null;
+
+      const html = await resp.text();
+
+      // Try multiple extraction patterns, ordered by reliability
+      const patterns = [
+        // og:video / og:video:url meta tags
+        /property=["']og:video(?::url)?["']\s+content=["']([^"']+\.mp4[^"']*)/i,
+        /content=["']([^"']+\.mp4[^"']*?)["']\s+property=["']og:video/i,
+        // twitter:player:stream
+        /name=["']twitter:player:stream["']\s+content=["']([^"']+)/i,
+        // JSON-LD VideoObject contentUrl
+        /"contentUrl"\s*:\s*"([^"]+\.mp4[^"]*)"/i,
+        /"contentUrl"\s*:\s*"([^"]+\.m3u8[^"]*)"/i,
+        // <video> tag src
+        /<video[^>]+src=["']([^"']+\.mp4[^"']*)/i,
+        /<source[^>]+src=["']([^"']+\.mp4[^"']*)/i,
+        /<source[^>]+src=["']([^"']+\.m3u8[^"']*)/i,
+        // data attributes
+        /data-video-?(?:src|url)=["']([^"']+)/i,
+        // Generic .mp4 URL in the page (less reliable but catches CDN links)
+        /["'](https?:\/\/[^"'\s]+?\.mp4(?:\?[^"'\s]*)?)/i,
+      ];
+
+      for (const pattern of patterns) {
+        const match = html.match(pattern);
+        if (match?.[1]) {
+          let url = match[1];
+          // Resolve relative URLs
+          if (url.startsWith("/")) {
+            const base = new URL(pageUrl);
+            url = `${base.protocol}//${base.host}${url}`;
+          }
+          console.error(`[scrape] Found video URL via pattern: ${url.slice(0, 120)}`);
+          return url;
+        }
+      }
+
+      return null;
+    } catch (err) {
+      console.error(`[scrape] Error fetching ${pageUrl}: ${err.message}`);
+      return null;
+    }
+  }
+
+  // Download a direct media URL to disk, returns true on success
+  async function downloadDirectUrl(url, outputPath) {
+    try {
+      const resp = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        redirect: "follow",
+      });
+      const contentType = resp.headers.get("content-type") || "";
+      if (!resp.ok || (!contentType.startsWith("video/") && !contentType.includes("mp4") && !contentType.includes("octet-stream"))) {
+        return false;
+      }
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      if (buffer.length < 1024) return false;
+      await fs.writeFile(outputPath, buffer);
+      console.error(`[download] Direct URL OK (${(buffer.length / 1024).toFixed(0)}KB)`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
 
   for (let i = 0; i < composition.segments.length; i++) {
     const seg = composition.segments[i];
 
     try {
-      if (seg.media.url && seg.media.url.startsWith("http")) {
+      if (!seg.media.url || !seg.media.url.startsWith("http")) continue;
+
+      let downloaded = false;
+
+      // Step 1: Try direct fetch (works for Pexels, Pixabay, direct CDN links, etc.)
+      try {
         const resp = await fetch(seg.media.url, {
           headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
           redirect: "follow",
         });
 
         const contentType = resp.headers.get("content-type") || "";
-        const isMedia = contentType.startsWith("image/") || contentType.startsWith("video/");
+        const isMediaType = contentType.startsWith("image/") || contentType.startsWith("video/");
 
-        if (resp.ok && isMedia) {
+        if (resp.ok && isMediaType) {
           const buffer = Buffer.from(await resp.arrayBuffer());
           if (buffer.length > 1024) {
             let ext = ".jpg";
@@ -90,13 +204,60 @@ async function main() {
             const filename = `segment-${seg.id}${ext}`;
             await fs.writeFile(path.join(jobDir, filename), buffer);
             assetMap.set(seg.id, { filename, isVideo: ext === ".mp4" || ext === ".webm" });
-            console.error(`[download] Segment ${seg.id}: OK (${(buffer.length / 1024).toFixed(0)}KB, ${ext})`);
-          } else {
-            console.error(`[download] Segment ${seg.id}: File too small, skipping`);
+            console.error(`[download] Segment ${seg.id}: direct OK (${(buffer.length / 1024).toFixed(0)}KB, ${ext})`);
+            downloaded = true;
           }
-        } else {
-          console.error(`[download] Segment ${seg.id}: Failed (status ${resp.status}, type: ${contentType})`);
         }
+      } catch {
+        // Direct fetch failed — will try yt-dlp below
+      }
+
+      // Step 2: If direct fetch didn't yield media and this is a video, try yt-dlp
+      if (!downloaded && seg.media.type === "video" && hasYtDlp) {
+        const filename = `segment-${seg.id}.mp4`;
+        const outPath = path.join(jobDir, filename);
+        console.error(`[download] Segment ${seg.id}: direct fetch failed, trying yt-dlp for ${seg.media.url}`);
+        const result = await downloadWithYtDlp(seg.media.url, outPath);
+        if (result && existsSync(outPath)) {
+          const stat = await fs.stat(outPath);
+          assetMap.set(seg.id, { filename, isVideo: true });
+          console.error(`[download] Segment ${seg.id}: yt-dlp OK (${(stat.size / 1024).toFixed(0)}KB)`);
+          downloaded = true;
+        } else {
+          console.error(`[download] Segment ${seg.id}: yt-dlp failed`);
+        }
+      }
+
+      // Step 3: Scrape the page HTML for embedded video URLs (og:video, <video> tags, JSON-LD, etc.)
+      if (!downloaded && seg.media.type === "video") {
+        console.error(`[download] Segment ${seg.id}: scraping page for video source...`);
+        const scrapedUrl = await scrapeVideoUrl(seg.media.url);
+        if (scrapedUrl) {
+          const filename = `segment-${seg.id}.mp4`;
+          const outPath = path.join(jobDir, filename);
+
+          // Try direct download of the scraped URL
+          if (await downloadDirectUrl(scrapedUrl, outPath)) {
+            const stat = await fs.stat(outPath);
+            assetMap.set(seg.id, { filename, isVideo: true });
+            console.error(`[download] Segment ${seg.id}: scraped URL OK (${(stat.size / 1024).toFixed(0)}KB)`);
+            downloaded = true;
+          }
+          // If scraped URL is also behind a player, try yt-dlp on it
+          else if (hasYtDlp) {
+            const result = await downloadWithYtDlp(scrapedUrl, outPath);
+            if (result && existsSync(outPath)) {
+              const stat = await fs.stat(outPath);
+              assetMap.set(seg.id, { filename, isVideo: true });
+              console.error(`[download] Segment ${seg.id}: yt-dlp on scraped URL OK (${(stat.size / 1024).toFixed(0)}KB)`);
+              downloaded = true;
+            }
+          }
+        }
+      }
+
+      if (!downloaded) {
+        console.error(`[download] Segment ${seg.id}: all methods failed — will be black in render`);
       }
     } catch (err) {
       console.error(`[download] Segment ${seg.id}: Error - ${err.message}`);

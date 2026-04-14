@@ -43,6 +43,8 @@ export type SegmentComposition = {
     type: "image" | "video";
     url: string;
     source: string;
+    clip_in?: number;   // seconds — start of clip trim (video only)
+    clip_out?: number;  // seconds — end of clip trim (video only)
   };
   voiceover: {
     audio_base64: string | null;
@@ -158,7 +160,7 @@ export function buildComposition(
     background_music?: { url: string; name: string };
   },
   mediaSelections: {
-    selections: { segment_id: number; media: { type: string; url?: string; full_url?: string; source: string } }[];
+    selections: { segment_id: number; media: { type: string; url?: string; full_url?: string; source: string; clip_in?: number; clip_out?: number } }[];
   },
   settings: ExportSettings
 ): VideoComposition {
@@ -180,6 +182,8 @@ export function buildComposition(
         type: (mediaSel?.media?.type as "image" | "video") || "image",
         url: mediaSel?.media?.full_url || mediaSel?.media?.url || "",
         source: mediaSel?.media?.source || "Unknown",
+        ...(mediaSel?.media?.clip_in != null ? { clip_in: mediaSel.media.clip_in } : {}),
+        ...(mediaSel?.media?.clip_out != null ? { clip_out: mediaSel.media.clip_out } : {}),
       },
       voiceover: voResult
         ? { audio_base64: voResult.audio_base64, provider: voResult.provider }

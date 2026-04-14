@@ -37,6 +37,7 @@ import {
   Copy,
   FileText,
   Image as ImageIcon,
+  Scissors,
 } from "lucide-react";
 
 type ExportPhase = "config" | "exporting" | "complete" | "error";
@@ -895,6 +896,12 @@ export default function PreviewExport({
                           <ExternalLink size={9} className="inline ml-1 -mt-0.5" />
                         </a>
                         {timeRange && <span className="text-[10px] text-gray-400 shrink-0">{timeRange}</span>}
+                        {seg.media.clip_in != null && seg.media.clip_out != null && (
+                          <span className="text-[10px] text-indigo-500 shrink-0 flex items-center gap-0.5">
+                            <Scissors size={9} />
+                            {seg.media.clip_in.toFixed(1)}s → {seg.media.clip_out.toFixed(1)}s
+                          </span>
+                        )}
                         <button
                           onClick={() => copyToClipboard(seg.media.url)}
                           className="p-1 rounded hover:bg-gray-200 text-gray-400 hover:text-gray-600 shrink-0 ml-auto"
