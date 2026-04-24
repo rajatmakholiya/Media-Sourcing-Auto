@@ -9,3 +9,6 @@ tmp
 .DS_Store
 .vscode
 .idea
+.playwright-browsers
+.playwright-sessions
+.claude

@@ -207,22 +207,54 @@ export function generateImageQueries(
   return queries;
 }
 
-// Score and rank results based on quality signals
-export function scoreResult(result: {
-  width?: number;
-  height?: number;
-  source?: string;
-  title?: string;
-  platform?: string;
-  duration_sec?: number;
-  type: string;
-  full_url?: string;
-}): number {
+/**
+ * Relevance context from the AI segmentation step. Used by scoreResult()
+ * to boost matches on canonical entities and penalize known noise terms.
+ */
+export type QueryContext = {
+  /** Canonical entity names expected in the result (e.g. "KC Concepcion"). */
+  entities?: string[];
+  /** Negative keywords — results whose title contains these are penalized. */
+  excludeTerms?: string[];
+  /** The primary query string — used for simple token-overlap scoring. */
+  query?: string;
+};
+
+/** Basic English stop-words removed before token overlap scoring. */
+const STOP_TOKENS = new Set([
+  "the", "a", "an", "of", "in", "on", "at", "for", "to", "and", "or",
+  "by", "with", "from", "is", "was", "are", "were", "be", "this", "that",
+]);
+
+function tokenize(s: string): string[] {
+  return s
+    .toLowerCase()
+    .replace(/[^\w\s']/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length > 2 && !STOP_TOKENS.has(t));
+}
+
+// Score and rank results based on quality + query-relevance signals.
+export function scoreResult(
+  result: {
+    width?: number;
+    height?: number;
+    source?: string;
+    title?: string;
+    platform?: string;
+    duration_sec?: number;
+    type: string;
+    full_url?: string;
+  },
+  allowNonLicensed = false,
+  context?: QueryContext,
+): number {
   let score = 0;
 
   // HARD PENALTY: URLs from stock agencies that block direct downloads
+  // (skipped when allowNonLicensed is enabled)
   const url = (result.full_url || "").toLowerCase();
-  if (isBlockedDomain(url)) return -1000;
+  if (!allowNonLicensed && isBlockedDomain(url)) return -1000;
 
   // Resolution bonus
   if (result.width) {
@@ -230,6 +262,13 @@ export function scoreResult(result: {
     else if (result.width >= 1920) score += 20;   // Full HD
     else if (result.width >= 1280) score += 10;   // HD
     else if (result.width >= 1200) score += 5;
+  }
+
+  // Landscape orientation bonus — most segments render better with wide images
+  if (result.type === "image" && result.width && result.height) {
+    const ratio = result.width / result.height;
+    if (ratio >= 1.3) score += 3;
+    else if (ratio < 0.9) score -= 3; // portrait — worse fit for video frames
   }
 
   // For videos: prefer short clips (better for B-roll)
@@ -246,7 +285,7 @@ export function scoreResult(result: {
   // Tier 2: Google CC-filtered / free site targeted
   if (result.source === "Google CC") score += 16;
   if (result.source === "Google (Free Sites)") score += 14;
-  if (result.source === "Firecrawl Editorial") score += 14;
+  // Firecrawl Editorial removed — covered by other sources
   // Tier 3: Royalty-free stock
   if (result.source === "Pexels") score += 12;
   // Tier 4: General web search
@@ -257,8 +296,47 @@ export function scoreResult(result: {
   if (result.platform === "YouTube") score += 5;
   if (result.platform === "Vimeo") score += 8; // Vimeo tends to be higher quality
 
-  // Penalize likely low-quality results based on title
   const title = (result.title || "").toLowerCase();
+
+  // ── Query-relevance scoring ───────────────────────────────
+  // This is the single biggest lever against off-topic results. The AI
+  // segmentation step emits canonical entities and exclude_terms for each
+  // segment; we use them here to boost on-topic matches and kill noise.
+  if (context) {
+    // Entity match — +12 per canonical entity name found in the title.
+    // Entities are already fully-qualified (e.g. "KC Concepcion") so this
+    // is a strong signal that the result is about the right subject.
+    if (context.entities && context.entities.length > 0) {
+      for (const ent of context.entities) {
+        const low = ent.toLowerCase().trim();
+        if (low.length >= 3 && title.includes(low)) score += 12;
+      }
+    }
+
+    // Exclude-term penalty — -25 per negative keyword found in title.
+    // AI only populates these when the subject is ambiguous.
+    if (context.excludeTerms && context.excludeTerms.length > 0) {
+      for (const term of context.excludeTerms) {
+        const low = term.toLowerCase().trim();
+        if (low.length >= 2 && title.includes(low)) score -= 25;
+      }
+    }
+
+    // Soft token-overlap bonus on the primary query — small weight so it
+    // doesn't overwhelm entity matches when the query and entities differ.
+    if (context.query && title) {
+      const qTokens = new Set(tokenize(context.query));
+      const titleTokens = new Set(tokenize(title));
+      let overlap = 0;
+      for (const t of qTokens) if (titleTokens.has(t)) overlap++;
+      if (qTokens.size > 0) {
+        const ratio = overlap / qTokens.size;
+        score += Math.round(ratio * 8); // 0–8 points
+      }
+    }
+  }
+
+  // Penalize likely low-quality results based on title
   if (title.includes("reaction") || title.includes("unboxing")) score -= 15;
   if (title.includes("compilation")) score -= 10;
   if (title.includes("meme") || title.includes("funny")) score -= 10;
@@ -270,6 +348,24 @@ export function scoreResult(result: {
   if (title.includes("slow motion") || title.includes("slowmo")) score += 5;
 
   return score;
+}
+
+/**
+ * Build the negative-keyword suffix for Serper/Firecrawl queries from
+ * AI-supplied exclude_terms. Returns a space-prefixed string suitable for
+ * concatenation (or "" if no terms). Example: " -fruit -recipe"
+ */
+export function buildExcludeSuffix(excludeTerms?: string[]): string {
+  if (!excludeTerms || excludeTerms.length === 0) return "";
+  return (
+    " " +
+    excludeTerms
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0 && !/\s/.test(t)) // single-token negatives only
+      .slice(0, 6)
+      .map((t) => `-${t}`)
+      .join(" ")
+  );
 }
 
 // Deduplicate results by visual similarity (URL-based)

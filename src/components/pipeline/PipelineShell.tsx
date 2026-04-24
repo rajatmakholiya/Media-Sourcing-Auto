@@ -27,6 +27,7 @@ export default function PipelineShell() {
   const [editedSegments, setEditedSegments] = useState<SegmentationResult | null>(null);
   const [voiceover, setVoiceover] = useState<VoiceoverData | null>(null);
   const [mediaSelections, setMediaSelections] = useState<MediaSelectionData | null>(null);
+  const [allowNonLicensed, setAllowNonLicensed] = useState(false);
 
   // SSE — listen for real-time updates from the MCP server
   const { connected } = usePipelineEvents({
@@ -126,6 +127,8 @@ export default function PipelineShell() {
         {currentStep === 0 && (
           <ScriptInput
             segments={segments}
+            allowNonLicensed={allowNonLicensed}
+            onAllowNonLicensedChange={setAllowNonLicensed}
             onComplete={(result) => {
               setSegments(result);
               setCurrentStep(1);
@@ -168,6 +171,7 @@ export default function PipelineShell() {
           <MediaSelection
             segments={activeSegments}
             voiceover={voiceover}
+            allowNonLicensed={allowNonLicensed}
             onComplete={(data) => {
               setMediaSelections(data);
               setCurrentStep(4);

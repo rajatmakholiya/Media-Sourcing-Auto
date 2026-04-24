@@ -2,15 +2,39 @@
 // Server-side session-aware store — each user gets isolated pipeline state
 // State is keyed by session ID so multiple users can work simultaneously
 
+export type MediaIntent = "portrait" | "action" | "scene" | "event" | "concept";
+
 export type Segment = {
   id: number;
   text: string;
   keyword: string; // kept for backward compat — defaults to image_query
   image_query: string;
   video_query: string;
+  /** Canonical subject resolved from script context (pronouns resolved). */
+  subject?: string;
+  /** Canonical entity names present in this segment — used for relevance scoring. */
+  search_entities?: string[];
+  /** Negative keywords to filter noise when the subject is ambiguous. */
+  exclude_terms?: string[];
+  /** Fallback queries to try if the primary returns nothing. */
+  alternate_queries?: {
+    image?: string[];
+    video?: string[];
+  };
+  /** Visual intent for the segment — drives modifier choice downstream. */
+  media_intent?: MediaIntent;
   fallback_from_previous?: boolean;
   word_count: number;
   estimated_duration_sec: number;
+};
+
+export type CanonicalEntity = {
+  /** The raw mention as it appears in the script (may equal canonical). */
+  mention: string;
+  /** Fully qualified name (e.g. "Real Madrid CF" for "Madrid"). */
+  canonical: string;
+  /** Role/affiliation/type (e.g. "Spanish football club", "NFL running back"). */
+  role?: string;
 };
 
 export type ScriptAnalysis = {
@@ -18,6 +42,10 @@ export type ScriptAnalysis = {
   tone: string;
   recency: string;
   key_entities: string[];
+  /** Disambiguated entity map — resolves pronouns and ambiguous mentions. */
+  canonical_entities?: CanonicalEntity[];
+  /** Terms that must accompany ambiguous names for correct results. */
+  disambiguators?: string[];
 };
 
 export type SegmentationResult = {

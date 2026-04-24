@@ -50,10 +50,25 @@ async function getBrowser(): Promise<Browser> {
 
   ensureSessionDirs();
 
-  browserInstance = await chromium.launch({
-    headless: true,
-    args: STEALTH_ARGS,
-  });
+  try {
+    // Primary: use Playwright's bundled Chromium (installed via npx playwright install)
+    browserInstance = await chromium.launch({
+      headless: true,
+      args: STEALTH_ARGS,
+    });
+  } catch (err) {
+    // Fallback: use system chromium (e.g. /usr/bin/chromium in Docker)
+    const systemChromium = process.env.CHROME_PATH || "/usr/bin/chromium";
+    console.warn(
+      `[playwright] Bundled browser not found, falling back to system chromium at ${systemChromium}:`,
+      err instanceof Error ? err.message : err
+    );
+    browserInstance = await chromium.launch({
+      headless: true,
+      executablePath: systemChromium,
+      args: STEALTH_ARGS,
+    });
+  }
 
   // Reset context refs when browser restarts
   imagoContext = null;

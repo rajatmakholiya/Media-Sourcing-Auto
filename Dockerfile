@@ -8,6 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 COPY package.json ./
 RUN npm install
 
+# Install Playwright's Chromium browser (separate from system chromium used by Remotion)
+# This downloads the exact browser version Playwright expects
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
+RUN npx playwright install chromium
+
 COPY . .
 
 # Build Next.js in standalone mode
@@ -20,7 +25,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 
-# Install Chromium dependencies for Remotion rendering
+# Install Chromium dependencies for BOTH Remotion and Playwright
+# System chromium → Remotion video rendering
+# Playwright uses its own bundled browser but needs the same shared libraries
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-liberation \
@@ -35,13 +42,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libasound2 \
     libpangocairo-1.0-0 \
     libgtk-3-0 \
+    libxshmfence1 \
+    libxkbcommon0 \
+    libx11-xcb1 \
+    libxcb-dri3-0 \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Tell Remotion/Puppeteer where Chromium is
+# Tell Remotion/Puppeteer where system Chromium is
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV CHROME_PATH=/usr/bin/chromium
 ENV REMOTION_CHROME_EXECUTABLE=/usr/bin/chromium
+
+# Tell Playwright where its bundled browser is (copied from builder)
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
 
 # Create non-root user
 RUN addgroup --system --gid 1001 nodejs && \
@@ -61,8 +75,12 @@ COPY --from=builder /app/tsconfig.json ./tsconfig.json
 # Copy node_modules from builder (has correct Linux binaries)
 COPY --from=builder /app/node_modules ./node_modules
 
-# Create tmp directories for exports
-RUN mkdir -p tmp/exports tmp/outputs && chown -R nextjs:nodejs tmp
+# Copy Playwright's bundled Chromium browser from builder
+COPY --from=builder /app/.playwright-browsers ./.playwright-browsers
+
+# Create tmp directories for exports + playwright session persistence
+RUN mkdir -p tmp/exports tmp/outputs .playwright-sessions/imago .playwright-sessions/imagn \
+    && chown -R nextjs:nodejs tmp .playwright-sessions .playwright-browsers
 
 USER nextjs
 

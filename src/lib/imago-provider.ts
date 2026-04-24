@@ -322,13 +322,15 @@ export async function searchImago(options: ImagoSearchOptions): Promise<ImagoRes
     page = await ctx.newPage();
     await applyStealthToPage(page);
 
-    // Best-effort login — never blocks search
-    await attemptLogin(page);
+    // Login disabled — Imago moved their login URLs and the probe loop wastes
+    // 15-25s returning nothing useful. DOM scrape of the public search page
+    // still yields 2-5 images. Cookie-based auth is planned for a future pass.
+    // void attemptLogin;
 
     const results: ImagoResult[] = [];
 
     // Set up response interception for the search API
-    let apiData: any = null;
+    let apiData: Record<string, unknown> | null = null;
     const apiPromise = new Promise<void>((resolve) => {
       const timeout = setTimeout(() => resolve(), 20000);
       page!.on("response", async (response: PwResponse) => {
@@ -370,7 +372,8 @@ export async function searchImago(options: ImagoSearchOptions): Promise<ImagoRes
 
     // Process API data if we intercepted it
     if (apiData) {
-      const hits = apiData.hits || apiData.results || apiData.data || [];
+      const raw = apiData as Record<string, unknown>;
+      const hits = (raw.hits as unknown) || (raw.results as unknown) || (raw.data as unknown) || [];
       console.log(`[imago] Got ${Array.isArray(hits) ? hits.length : 0} results from API intercept`);
 
       if (Array.isArray(hits)) {
@@ -422,11 +425,16 @@ export async function searchImago(options: ImagoSearchOptions): Promise<ImagoRes
         document.querySelectorAll("img").forEach((img) => {
           const src = img.src || img.dataset.src || img.dataset.lazySrc || "";
           if (!src || src.startsWith("data:")) return;
-          // Filter UI elements
+          // Filter UI elements — case-insensitive so "IMAGO-Primary_Logos..."
+          // also gets caught (the site logo was slipping through lower-case checks).
+          const lower = src.toLowerCase();
+          if (lower.includes("logo") || lower.includes("icon") || lower.includes("avatar") || lower.includes("sprite")) return;
+          if (lower.includes("flag") || lower.includes("arrow") || lower.includes("button")) return;
+          if (lower.includes("/associations/") || lower.includes("/partners/") || lower.includes("placeholder")) return;
+          if (lower.endsWith(".svg")) return; // real editorial photos are always raster
+          // Size check after the URL filters so we don't waste checks on logos.
           if (img.naturalWidth > 0 && img.naturalWidth < 80) return;
           if (img.width > 0 && img.width < 80) return;
-          if (src.includes("logo") || src.includes("icon") || src.includes("avatar") || src.includes("sprite")) return;
-          if (src.includes("flag") || src.includes("arrow") || src.includes("button")) return;
 
           const highRes =
             img.dataset.original ||

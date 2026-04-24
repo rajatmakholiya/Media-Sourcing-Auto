@@ -3,7 +3,13 @@
 // Sources: Serper (standard + CC + site-targeted) + Free providers (Wikimedia, Pexels, etc.)
 //          + Licensed providers (Imago, Imagn) + Firecrawl (standard + editorial)
 import { NextRequest, NextResponse } from "next/server";
-import { isBlockedDomain, deduplicateResults, scoreResult } from "@/lib/search-optimizer";
+import {
+  isBlockedDomain,
+  deduplicateResults,
+  scoreResult,
+  buildExcludeSuffix,
+  type QueryContext,
+} from "@/lib/search-optimizer";
 import { searchImago } from "@/lib/imago-provider";
 import { searchImagn } from "@/lib/imagn-provider";
 import { searchFreeImages, type FreeImageResult } from "@/lib/free-image-providers";
@@ -56,15 +62,18 @@ function freeToMedia(r: FreeImageResult): MediaResult {
 // ============================================
 // SERPER — Google Images (standard)
 // ============================================
-async function googleImages(query: string, count: number, minWidth = 800): Promise<MediaResult[]> {
+async function googleImages(query: string, count: number, minWidth = 800, skipBlockFilter = false, excludeTerms: string[] = []): Promise<MediaResult[]> {
   const key = process.env.SERPER_API_KEY;
   if (!key) return [];
   try {
+    const excl = buildExcludeSuffix(excludeTerms);
     const res = await fetch("https://google.serper.dev/images", {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
       body: JSON.stringify({
-        q: `${query} -collage -montage -compilation -site:gettyimages.com -site:reuters.com`,
+        q: skipBlockFilter
+          ? `${query} -collage -montage -compilation${excl}`
+          : `${query} -collage -montage -compilation -site:gettyimages.com -site:reuters.com${excl}`,
         num: Math.min(count * 3, 40),
       }),
     });
@@ -72,7 +81,7 @@ async function googleImages(query: string, count: number, minWidth = 800): Promi
     const data = await res.json();
     const results: MediaResult[] = [];
     for (const img of data.images || []) {
-      if (img.imageUrl && img.imageWidth >= minWidth && !isBlockedDomain(img.imageUrl) && !isBlockedDomain(img.link || "")) {
+      if (img.imageUrl && img.imageWidth >= minWidth && (skipBlockFilter || (!isBlockedDomain(img.imageUrl) && !isBlockedDomain(img.link || "")))) {
         results.push({
           id: `serper-${results.length}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           type: "image",
@@ -96,15 +105,18 @@ async function googleImages(query: string, count: number, minWidth = 800): Promi
 // ============================================
 // SERPER — Creative Commons filtered
 // ============================================
-async function googleCCImages(query: string, count: number): Promise<MediaResult[]> {
+async function googleCCImages(query: string, count: number, skipBlockFilter = false, excludeTerms: string[] = []): Promise<MediaResult[]> {
   const key = process.env.SERPER_API_KEY;
   if (!key) return [];
   try {
+    const excl = buildExcludeSuffix(excludeTerms);
     const res = await fetch("https://google.serper.dev/images", {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
       body: JSON.stringify({
-        q: `${query} photo -collage -montage -compilation -site:gettyimages.com -site:reuters.com`,
+        q: skipBlockFilter
+          ? `${query} photo -collage -montage -compilation${excl}`
+          : `${query} photo -collage -montage -compilation -site:gettyimages.com -site:reuters.com${excl}`,
         num: Math.min(count * 3, 40),
         tbs: "il:cl",
       }),
@@ -113,7 +125,7 @@ async function googleCCImages(query: string, count: number): Promise<MediaResult
     const data = await res.json();
     const results: MediaResult[] = [];
     for (const img of data.images || []) {
-      if (img.imageUrl && img.imageWidth >= 600 && !isBlockedDomain(img.imageUrl) && !isBlockedDomain(img.link || "")) {
+      if (img.imageUrl && img.imageWidth >= 600 && (skipBlockFilter || (!isBlockedDomain(img.imageUrl) && !isBlockedDomain(img.link || "")))) {
         results.push({
           id: `serper-cc-${results.length}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
           type: "image",
@@ -182,47 +194,28 @@ async function googleSiteImages(query: string, count: number): Promise<MediaResu
 }
 
 // ============================================
-// FIRECRAWL — Deep extraction (standard + editorial)
+// FIRECRAWL — Native image search (v2 API, no scraping)
+// Uses sources: ["images"] for direct image results — 1 credit per 10 results
 // ============================================
-async function firecrawlGoogleImages(query: string, count: number): Promise<MediaResult[]> {
+async function firecrawlGoogleImages(query: string, count: number, skipBlockFilter = false, excludeTerms: string[] = []): Promise<MediaResult[]> {
   const key = process.env.FIRECRAWL_API_KEY;
   if (!key) return [];
   try {
-    console.log(`[firecrawl-images] Searching: "${query}" (limit: ${count + 5})`);
+    console.log(`[firecrawl-images] Searching (v2 native): "${query}" (limit: ${count + 5})`);
 
-    const res = await fetch("https://api.firecrawl.dev/v1/search", {
+    const excl = buildExcludeSuffix(excludeTerms);
+    const res = await fetch("https://api.firecrawl.dev/v2/search", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
       },
       body: JSON.stringify({
-        query: `${query} high resolution photo -shutterstock -gettyimages -istockphoto -adobe.stock -reuters -collage -montage`,
+        query: skipBlockFilter
+          ? `${query} photo larger:800x600 -collage -montage${excl}`
+          : `${query} photo larger:800x600 -shutterstock -gettyimages -istockphoto -depositphotos -reuters -collage -montage${excl}`,
         limit: count + 5,
-        scrapeOptions: {
-          formats: ["extract"],
-          extract: {
-            schema: {
-              type: "object",
-              properties: {
-                images: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      url: { type: "string", description: "Direct URL to image file (.jpg, .jpeg, .png, .webp)" },
-                      alt: { type: "string", description: "Alt text or caption" },
-                      credit: { type: "string", description: "Photo credit or source" },
-                    },
-                    required: ["url"],
-                  },
-                },
-              },
-              required: ["images"],
-            },
-            prompt: "Extract all high-quality photograph URLs. Get img src with .jpg, .jpeg, .png, .webp. Only actual photographs — ignore icons, logos, avatars, ads. Prefer largest resolution.",
-          },
-        },
+        sources: ["images"],
       }),
     });
 
@@ -236,40 +229,21 @@ async function firecrawlGoogleImages(query: string, count: number): Promise<Medi
     }
 
     const data = await res.json();
-    console.log(`[firecrawl-images] Got ${data.data?.length || 0} search results`);
+    const imageResults = data.data?.images || [];
+    console.log(`[firecrawl-images] Got ${imageResults.length} native image results`);
     const results: MediaResult[] = [];
 
-    for (const result of data.data || []) {
-      const pageTitle = result.title || "";
-      const pageUrl = result.url || "";
-      const extractedImages = result.extract?.images || [];
-
-      for (const img of extractedImages) {
-        if (img.url?.startsWith("http") && isValidImageUrl(img.url) && !isBlockedDomain(img.url) && !isBlockedDomain(pageUrl)) {
-          results.push({
-            id: `fc-${results.length}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            type: "image",
-            thumbnail: img.url, preview_url: img.url, full_url: img.url,
-            source: "Firecrawl", author: img.credit || getDomainName(pageUrl),
-            width: 1200, height: 800,
-            title: img.alt || pageTitle.slice(0, 80), page_url: pageUrl,
-          });
-        }
-        if (results.length >= count) break;
-      }
-
-      const ogImage = result.metadata?.ogImage || result.metadata?.["og:image"];
-      if (ogImage?.startsWith("http") && isValidImageUrl(ogImage) && !isBlockedDomain(ogImage)) {
-        if (!results.some((r) => r.full_url === ogImage)) {
-          results.push({
-            id: `fc-og-${results.length}-${Date.now()}`,
-            type: "image",
-            thumbnail: ogImage, preview_url: ogImage, full_url: ogImage,
-            source: "Firecrawl", author: getDomainName(pageUrl),
-            width: 1200, height: 800,
-            title: pageTitle.slice(0, 80), page_url: pageUrl,
-          });
-        }
+    for (const img of imageResults) {
+      const imgUrl = img.imageUrl || "";
+      if (imgUrl.startsWith("http") && (skipBlockFilter || (!isBlockedDomain(imgUrl) && !isBlockedDomain(img.url || "")))) {
+        results.push({
+          id: `fc-${results.length}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          type: "image",
+          thumbnail: imgUrl, preview_url: imgUrl, full_url: imgUrl,
+          source: "Firecrawl", author: getDomainName(img.url || imgUrl),
+          width: img.imageWidth || 1200, height: img.imageHeight || 800,
+          title: img.title || "", page_url: img.url || "",
+        });
       }
       if (results.length >= count) break;
     }
@@ -285,20 +259,21 @@ async function firecrawlGoogleImages(query: string, count: number): Promise<Medi
 // ============================================
 // SERPER — Google Videos
 // ============================================
-async function googleVideos(query: string, count: number): Promise<MediaResult[]> {
+async function googleVideos(query: string, count: number, skipBlockFilter = false, excludeTerms: string[] = []): Promise<MediaResult[]> {
   const key = process.env.SERPER_API_KEY;
   if (!key) return [];
   try {
+    const excl = buildExcludeSuffix(excludeTerms);
     const res = await fetch("https://google.serper.dev/videos", {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
-      body: JSON.stringify({ q: query, num: count * 3 }),
+      body: JSON.stringify({ q: `${query}${excl}`, num: count * 3 }),
     });
     if (!res.ok) return [];
     const data = await res.json();
     const results: MediaResult[] = [];
     for (const vid of data.videos || []) {
-      if (vid.link && !isBlockedDomain(vid.link)) {
+      if (vid.link && (skipBlockFilter || !isBlockedDomain(vid.link))) {
         const isYouTube = /youtube\.com|youtu\.be/i.test(vid.link);
         results.push({
           id: `vid-${results.length}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -362,16 +337,48 @@ export const VIDEO_SOURCE_KEYS = ["Google Video"] as const;
 
 export async function POST(req: NextRequest) {
   try {
-    const { query, video_query, slide_id, mode, source } = await req.json();
+    const {
+      query,
+      video_query,
+      slide_id,
+      mode,
+      source,
+      allow_non_licensed,
+      search_entities,
+      exclude_terms,
+      alternate_queries,
+      subject,
+    } = await req.json();
+
+    // Editorial archives (Imago/Imagn) index broad subjects like "NFL Draft 2025",
+    // not visual moments like "countdown board". Use the segment's canonical
+    // subject if it's a meaningful broader rephrasing of the query; otherwise
+    // fall back to the full query.
+    const editorialQuery =
+      typeof subject === "string" && subject.trim().length >= 3 && subject.trim() !== query?.trim()
+        ? subject.trim()
+        : query;
+    const skipBlock = allow_non_licensed === true;
     if (!query) return NextResponse.json({ error: "Query required" }, { status: 400 });
+
+    // Relevance context from the AI segmentation step — used to score results.
+    const entities: string[] = Array.isArray(search_entities) ? search_entities : [];
+    const excludes: string[] = Array.isArray(exclude_terms) ? exclude_terms : [];
+    const altImageQueries: string[] = Array.isArray(alternate_queries?.image) ? alternate_queries.image : [];
+    const altVideoQueries: string[] = Array.isArray(alternate_queries?.video) ? alternate_queries.video : [];
+    const imgContext: QueryContext = { entities, excludeTerms: excludes, query };
+    const vidContext: QueryContext = { entities, excludeTerms: excludes, query: video_query || query };
 
     const isVideoMode = mode === "video";
     const hasSerper = !!process.env.SERPER_API_KEY;
     const hasFirecrawl = !!process.env.FIRECRAWL_API_KEY;
-    const hasImago = !!(process.env.IMAGO_EMAIL && process.env.IMAGO_PASSWORD);
-    const hasImagn = !!(process.env.IMAGN_EMAIL && process.env.IMAGN_PASSWORD);
+    // Imago/Imagn are now pure HTTP scrapes — no credentials needed.
+    const hasImago = true;
+    const hasImagn = true;
 
-    if (!hasSerper && !hasFirecrawl && !hasImago && !hasImagn) {
+    if (!hasSerper && !hasFirecrawl) {
+      // Still fall back to demo if no search-API keys at all are configured,
+      // since scrapers alone produce thin results without Serper/Firecrawl.
       return NextResponse.json({ slide_id, images: demoImages(query, 14), videos: [], is_demo: true });
     }
 
@@ -384,7 +391,7 @@ export async function POST(req: NextRequest) {
     const runners: Record<string, () => Promise<MediaResult[]>> = {
       "Imago": () =>
         hasImago
-          ? searchImago({ query, category, count: 5 })
+          ? searchImago({ query: editorialQuery, category, count: 5 })
               .then((results) => results.map((r): MediaResult => ({
                 id: r.id, type: "image",
                 thumbnail: r.thumbnail, preview_url: r.preview_url, full_url: r.full_url,
@@ -396,7 +403,7 @@ export async function POST(req: NextRequest) {
           : Promise.resolve([]),
       "Imagn": () =>
         hasImagn
-          ? searchImagn({ query, count: 5 })
+          ? searchImagn({ query: editorialQuery, count: 5 })
               .then((results) => results.map((r): MediaResult => ({
                 id: r.id, type: "image",
                 thumbnail: r.thumbnail, preview_url: r.preview_url, full_url: r.full_url,
@@ -408,30 +415,43 @@ export async function POST(req: NextRequest) {
           : Promise.resolve([]),
       "Google": () =>
         hasSerper
-          ? googleImages(`${query} high resolution editorial photo`, 5, 800).catch(() => [])
+          ? (async () => {
+              // Primary + one alternate query fan-out for wider coverage.
+              const primary = await googleImages(`${query} high resolution editorial photo`, 5, 800, skipBlock, excludes).catch(() => []);
+              const alt = altImageQueries[0]
+                ? await googleImages(altImageQueries[0], 3, 800, skipBlock, excludes).catch(() => [])
+                : [];
+              return [...primary, ...alt];
+            })()
           : Promise.resolve([]),
       "Google CC": () =>
-        hasSerper ? googleCCImages(query, 5).catch(() => []) : Promise.resolve([]),
+        hasSerper ? googleCCImages(query, 5, skipBlock, excludes).catch(() => []) : Promise.resolve([]),
       "Pexels": () =>
+        // Pexels doesn't support `-term` negatives; relevance scoring filters post-hoc.
         searchFreeImages({ query, count: 3, perProvider: 3, providers: ["pexels"] })
           .then((results) => results.map(freeToMedia))
           .catch(() => [] as MediaResult[]),
       "Firecrawl": () =>
-        hasFirecrawl ? firecrawlGoogleImages(query, 5).catch(() => []) : Promise.resolve([]),
+        hasFirecrawl ? firecrawlGoogleImages(query, 5, skipBlock, excludes).catch(() => []) : Promise.resolve([]),
     };
 
     const videoRunners: Record<string, () => Promise<MediaResult[]>> = {
       "Google Video": async () => {
         if (!hasSerper || !video_query) return [];
-        const [a, b] = await Promise.all([
-          googleVideos(video_query, 5).catch(() => []),
-          googleVideos(`${video_query} highlights`, 3).catch(() => []),
+        const [a, b, c] = await Promise.all([
+          googleVideos(video_query, 5, skipBlock, excludes).catch(() => []),
+          googleVideos(`${video_query} highlights`, 3, skipBlock, excludes).catch(() => []),
+          altVideoQueries[0]
+            ? googleVideos(altVideoQueries[0], 3, skipBlock, excludes).catch(() => [])
+            : Promise.resolve([] as MediaResult[]),
         ]);
-        return [...a, ...b];
+        return [...a, ...b, ...c];
       },
     };
 
     // ── Single-source mode: run only the requested source and return ──
+    // Within a single source, sort by relevance so the most on-topic results
+    // surface first in the UI (the client still shows the full list).
     if (source && typeof source === "string") {
       const isVideoSource = source in videoRunners;
       const runner = runners[source] || videoRunners[source];
@@ -439,12 +459,17 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: `Unknown source: ${source}` }, { status: 400 });
       }
       const results = await runner();
-      console.log(`[media-sourcing/search] source="${source}" "${query}" → ${results.length}`);
+      const ctx = isVideoSource ? vidContext : imgContext;
+      const sorted = results
+        .map((r) => ({ r, s: scoreResult(r, skipBlock, ctx) }))
+        .sort((a, b) => b.s - a.s)
+        .map(({ r }) => r);
+      console.log(`[media-sourcing/search] source="${source}" "${query}" → ${sorted.length}`);
       return NextResponse.json({
         slide_id,
         source,
-        images: isVideoSource ? [] : results,
-        videos: isVideoSource ? results : [],
+        images: isVideoSource ? [] : sorted,
+        videos: isVideoSource ? sorted : [],
         is_demo: false,
       });
     }
@@ -461,9 +486,9 @@ export async function POST(req: NextRequest) {
       ? await settleAll(Object.values(videoRunners).map((r) => r()))
       : [];
 
-    // Deduplicate and score
+    // Deduplicate and score (context-aware relevance: entity boost + exclude penalty)
     const dedupedImages = deduplicateResults(imageResults)
-      .map((r) => ({ ...r, _score: scoreResult(r) }))
+      .map((r) => ({ ...r, _score: scoreResult(r, skipBlock, imgContext) }))
       .filter((r) => r._score > -500)
       .sort((a, b) => b._score - a._score);
 
@@ -473,7 +498,7 @@ export async function POST(req: NextRequest) {
     // Per-source limits: major sources = 5, Pexels = 3
     const SOURCE_LIMITS: Record<string, number> = {
       Imago: 5, Imagn: 5, Google: 5, "Google CC": 5,
-      Firecrawl: 5, "Firecrawl Editorial": 5, "Google (Free Sites)": 5,
+      Firecrawl: 5, "Google (Free Sites)": 5,
       Pexels: 3,
     };
 

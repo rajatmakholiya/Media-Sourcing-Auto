@@ -3,6 +3,7 @@
 
 import { useState, useCallback } from "react";
 import { Card, Button, Textarea, Badge, Spinner } from "@/components/ui";
+import { ShieldOff } from "lucide-react";
 import type { SegmentationResult } from "@/lib/pipeline-store";
 
 const SAMPLE_SCRIPT = `With the NFL Draft clock ticking, Wednesday’s pro day circuit saw future stars solidify their stock and sleepers emerge from the shadows. While a dozen potential draftees at Texas A&M commanded a large crowd of scouts, it was a versatile athlete at Nebraska who may have made the biggest leap of the day.Texas A&M: Aggies Showcase DepthA massive contingent of NFL personnel attended the Aggies' workout, as the program features nearly a dozen players expected to be drafted, including three potential first-rounders.KC Concepcion (WR/RS): A projected first-round pick, Concepcion did not participate in the workout following a minor "routine and preventative" knee procedure three weeks ago. However, his draft stock remains high. He has already completed "Top 30" visits with the Patriots, Ravens, and Titans, with meetings scheduled for the 49ers, Browns, and Dolphins. He is currently projected to go between picks 28 and 38.Tyler Onyedim (DL): After skipping the combine drills, Onyedim clocked a 4.92-second 40-yard dash. He looked fluid in position drills run by the New England Patriots. Drawing comparisons to fellow Aggie alum Nnamdi Madubuike, Onyedim met with the Patriots, Cowboys, and Jets, and spent significant time with the Saints following the workout.Le’Veon Moss (RB): Still recovering from a recent tightrope ankle procedure, Moss posted a respectable 4.58 in the 40-yard dash. Despite durability concerns throughout his college career, his explosiveness earns him third-round grades. He had dinner with the Cowboys and met extensively with the Dolphins.Nate Boerkircher (TE): After a limited combine due to a calf injury, the 6'5", 245-pound tight end posted a 4.78-second 40-yard dash and caught the ball well in drills. He met with the Bengals and had dinner with the Cowboys prior to the event.Nebraska: Sleepers and SpecialistsWhile the crowd in Lincoln was smaller than in College Station, several Huskers made a compelling case for the later rounds of the draft.Emmett Johnson (RB): The Big Ten Running Back of the Year improved his combine numbers, timing between 4.46 and 4.53 seconds in the 40-yard dash (up from a 4.56 in Indy). The Saints and Cowboys had running backs coaches on hand specifically to watch his receiving drills.DeShon Singleton (S): A physical specimen at 6'3" and 205 lbs, Singleton impressed with a 39.5-inch vertical and a 10-foot-10 broad jump. While he previously mentioned a move to linebacker, NFL teams—specifically the Bengals, Saints, and Titans—view him strictly as a zone or strong safety.Note: The Titans' interest is notable given new head coach Robert Saleh’s history with hybrid defenders like Jamien Sherwood.Heinrich Haarberg (TE): The standout of the day, the former quarterback turned tight end measured nearly 6'5" and 237 lbs. He posted a 4.51-second 40-yard dash, a 38-inch vertical, and a 4.15 short shuttle. Currently a developmental "freak athlete" prospect, he is drawing significant interest from the Buffalo Bills.`;
@@ -19,9 +20,13 @@ type Phase = "input" | "processing" | "result" | "error";
 
 export default function ScriptInput({
   segments,
+  allowNonLicensed,
+  onAllowNonLicensedChange,
   onComplete,
 }: {
   segments: SegmentationResult | null;
+  allowNonLicensed: boolean;
+  onAllowNonLicensedChange: (value: boolean) => void;
   onComplete: (result: SegmentationResult) => void;
 }) {
   const [script, setScript] = useState("");
@@ -118,12 +123,30 @@ export default function ScriptInput({
                 </Button>
               )}
             </div>
-            <Button
-              disabled={script.trim().length <= 10}
-              onClick={runSegmentation}
-            >
-              Segment script
-            </Button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => onAllowNonLicensedChange(!allowNonLicensed)}
+                className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold transition-colors border ${
+                  allowNonLicensed
+                    ? "bg-amber-50 text-amber-700 border-amber-200"
+                    : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                }`}
+                title={
+                  allowNonLicensed
+                    ? "Unrestricted search active. Stock agencies (Getty, Shutterstock) are included."
+                    : "Strict licensing active. Stock agencies are filtered out."
+                }
+              >
+                <ShieldOff size={15} className={allowNonLicensed ? "text-amber-500" : "text-gray-400"} />
+                Non-Licensed
+              </button>
+              <Button
+                disabled={script.trim().length <= 10}
+                onClick={runSegmentation}
+              >
+                Segment script
+              </Button>
+            </div>
           </div>
         </Card>
       </div>

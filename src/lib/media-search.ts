@@ -9,7 +9,13 @@
 //   6. Firecrawl — deep web extraction targeting free-use sites
 // Returns high-quality, downloadable images and videos
 
-import { isBlockedDomain, deduplicateResults, scoreResult } from "./search-optimizer";
+import {
+  isBlockedDomain,
+  deduplicateResults,
+  scoreResult,
+  buildExcludeSuffix,
+  type QueryContext,
+} from "./search-optimizer";
 import { searchImago } from "./imago-provider";
 import { searchImagn } from "./imagn-provider";
 import { searchFreeImages, type FreeImageResult } from "./free-image-providers";
@@ -87,12 +93,15 @@ function freeToMedia(r: FreeImageResult): MediaResult {
 // ============================================
 
 /** Standard Serper image search */
-async function serperImages(query: string, count: number, age: ContentAge): Promise<MediaResult[]> {
+async function serperImages(query: string, count: number, age: ContentAge, skipBlockFilter = false, excludeTerms: string[] = []): Promise<MediaResult[]> {
   const key = process.env.SERPER_API_KEY;
   if (!key) return [];
   try {
+    const excl = buildExcludeSuffix(excludeTerms);
     const body: Record<string, unknown> = {
-      q: `${query} imagesize:large -collage -montage -compilation -site:gettyimages.com -site:reuters.com`,
+      q: skipBlockFilter
+        ? `${query} imagesize:large -collage -montage -compilation${excl}`
+        : `${query} imagesize:large -collage -montage -compilation -site:gettyimages.com -site:reuters.com${excl}`,
       num: Math.min(count * 3, 40),
     };
     const tbs = getTimeBias(age);
@@ -107,7 +116,7 @@ async function serperImages(query: string, count: number, age: ContentAge): Prom
     const data = await res.json();
     const results: MediaResult[] = [];
     for (const img of data.images || []) {
-      if (img.imageUrl && img.imageWidth >= 800 && !isBlockedDomain(img.imageUrl) && !isBlockedDomain(img.link || "")) {
+      if (img.imageUrl && img.imageWidth >= 800 && (skipBlockFilter || (!isBlockedDomain(img.imageUrl) && !isBlockedDomain(img.link || "")))) {
         results.push({
           id: `serper-img-${results.length}-${Date.now()}`,
           type: "image",
@@ -129,15 +138,18 @@ async function serperImages(query: string, count: number, age: ContentAge): Prom
 }
 
 /** Serper — Creative Commons filtered images (tbs=il:cl) */
-async function serperCCImages(query: string, count: number): Promise<MediaResult[]> {
+async function serperCCImages(query: string, count: number, skipBlockFilter = false, excludeTerms: string[] = []): Promise<MediaResult[]> {
   const key = process.env.SERPER_API_KEY;
   if (!key) return [];
   try {
+    const excl = buildExcludeSuffix(excludeTerms);
     const res = await fetchWithTimeout("https://google.serper.dev/images", {
       method: "POST",
       headers: { "X-API-KEY": key, "Content-Type": "application/json" },
       body: JSON.stringify({
-        q: `${query} photo -collage -montage -compilation -site:gettyimages.com -site:reuters.com`,
+        q: skipBlockFilter
+          ? `${query} photo -collage -montage -compilation${excl}`
+          : `${query} photo -collage -montage -compilation -site:gettyimages.com -site:reuters.com${excl}`,
         num: Math.min(count * 3, 40),
         tbs: "il:cl", // Creative Commons license filter
       }),
@@ -146,7 +158,7 @@ async function serperCCImages(query: string, count: number): Promise<MediaResult
     const data = await res.json();
     const results: MediaResult[] = [];
     for (const img of data.images || []) {
-      if (img.imageUrl && img.imageWidth >= 800 && !isBlockedDomain(img.imageUrl) && !isBlockedDomain(img.link || "")) {
+      if (img.imageUrl && img.imageWidth >= 800 && (skipBlockFilter || (!isBlockedDomain(img.imageUrl) && !isBlockedDomain(img.link || "")))) {
         results.push({
           id: `serper-cc-${results.length}-${Date.now()}`,
           type: "image",
@@ -247,11 +259,12 @@ const FREE_EDITORIAL_SITES = [
 // ============================================
 // SERPER — Google Videos
 // ============================================
-async function serperVideos(query: string, count: number, age: ContentAge): Promise<MediaResult[]> {
+async function serperVideos(query: string, count: number, age: ContentAge, skipBlockFilter = false, excludeTerms: string[] = []): Promise<MediaResult[]> {
   const key = process.env.SERPER_API_KEY;
   if (!key) return [];
   try {
-    const body: Record<string, unknown> = { q: query, num: Math.min(count * 3, 30) };
+    const excl = buildExcludeSuffix(excludeTerms);
+    const body: Record<string, unknown> = { q: `${query}${excl}`, num: Math.min(count * 3, 30) };
     const tbs = getTimeBias(age);
     if (tbs) body.tbs = tbs;
 
@@ -264,7 +277,7 @@ async function serperVideos(query: string, count: number, age: ContentAge): Prom
     const data = await res.json();
     const results: MediaResult[] = [];
     for (const vid of data.videos || []) {
-      if (vid.link && !isBlockedDomain(vid.link)) {
+      if (vid.link && (skipBlockFilter || !isBlockedDomain(vid.link))) {
         results.push({
           id: `serper-vid-${results.length}-${Date.now()}`,
           type: "video",
@@ -286,50 +299,31 @@ async function serperVideos(query: string, count: number, age: ContentAge): Prom
 }
 
 // ============================================
-// FIRECRAWL — Targeted extraction from free-use sites
+// FIRECRAWL — Native image search (v2 API, no scraping)
+// Uses sources: ["images"] for direct image results — 1 credit per 10 results
 // ============================================
-async function firecrawlGoogleImages(query: string, count: number): Promise<MediaResult[]> {
+async function firecrawlGoogleImages(query: string, count: number, skipBlockFilter = false, excludeTerms: string[] = []): Promise<MediaResult[]> {
   const key = process.env.FIRECRAWL_API_KEY;
   if (!key) {
     console.log("[firecrawl-images] No FIRECRAWL_API_KEY configured, skipping");
     return [];
   }
   try {
-    console.log(`[firecrawl-images] Searching: "${query}" (limit: ${count + 5})`);
+    console.log(`[firecrawl-images] Searching (v2 native): "${query}" (limit: ${count + 5})`);
 
-    const res = await fetchWithTimeout("https://api.firecrawl.dev/v1/search", {
+    const excl = buildExcludeSuffix(excludeTerms);
+    const res = await fetchWithTimeout("https://api.firecrawl.dev/v2/search", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
       },
       body: JSON.stringify({
-        query: `${query} high resolution photo -shutterstock -gettyimages -istockphoto -adobe.stock -depositphotos -reuters -collage -montage`,
+        query: skipBlockFilter
+          ? `${query} photo larger:800x600 -collage -montage${excl}`
+          : `${query} photo larger:800x600 -shutterstock -gettyimages -istockphoto -depositphotos -reuters -collage -montage${excl}`,
         limit: count + 5,
-        scrapeOptions: {
-          formats: ["extract"],
-          extract: {
-            schema: {
-              type: "object",
-              properties: {
-                images: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      url: { type: "string", description: "Direct URL to the image file (.jpg, .jpeg, .png, .webp)" },
-                      alt: { type: "string", description: "Alt text or caption" },
-                      credit: { type: "string", description: "Photo credit or source" },
-                    },
-                    required: ["url"],
-                  },
-                },
-              },
-              required: ["images"],
-            },
-            prompt: "Extract all high-quality photograph URLs from this page. Look for img src attributes with file extensions .jpg, .jpeg, .png, .webp. Only include actual photographs — ignore icons, logos, avatars, ads, and UI elements. Prefer the largest/highest resolution version available.",
-          },
-        },
+        sources: ["images"],
       }),
     }, 12000);
 
@@ -343,52 +337,28 @@ async function firecrawlGoogleImages(query: string, count: number): Promise<Medi
     }
 
     const data = await res.json();
-    console.log(`[firecrawl-images] Got ${data.data?.length || 0} search results`);
+    const imageResults = data.data?.images || [];
+    console.log(`[firecrawl-images] Got ${imageResults.length} native image results`);
 
     const results: MediaResult[] = [];
 
-    for (const result of data.data || []) {
-      const pageTitle = result.title || "";
-      const pageUrl = result.url || "";
-      const extractedImages = result.extract?.images || [];
-
-      for (const img of extractedImages) {
-        if (img.url?.startsWith("http") && isValidImageUrl(img.url) && !isBlockedDomain(img.url)) {
-          results.push({
-            id: `fc-img-${results.length}-${Date.now()}`,
-            type: "image",
-            thumbnail: img.url,
-            preview_url: img.url,
-            full_url: img.url,
-            source: "Firecrawl",
-            author: img.credit || getDomainName(pageUrl),
-            width: 1200, height: 800,
-            title: img.alt || pageTitle.slice(0, 80),
-            page_url: pageUrl,
-          });
-        }
-        if (results.length >= count) break;
+    for (const img of imageResults) {
+      const imgUrl = img.imageUrl || "";
+      if (imgUrl.startsWith("http") && (skipBlockFilter || (!isBlockedDomain(imgUrl) && !isBlockedDomain(img.url || "")))) {
+        results.push({
+          id: `fc-img-${results.length}-${Date.now()}`,
+          type: "image",
+          thumbnail: imgUrl,
+          preview_url: imgUrl,
+          full_url: imgUrl,
+          source: "Firecrawl",
+          author: getDomainName(img.url || imgUrl),
+          width: img.imageWidth || 1200,
+          height: img.imageHeight || 800,
+          title: img.title || "",
+          page_url: img.url || "",
+        });
       }
-
-      // og:image fallback
-      const ogImage = result.metadata?.ogImage || result.metadata?.["og:image"];
-      if (ogImage?.startsWith("http") && isValidImageUrl(ogImage) && !isBlockedDomain(ogImage)) {
-        if (!results.some((r) => r.full_url === ogImage)) {
-          results.push({
-            id: `fc-og-${results.length}-${Date.now()}`,
-            type: "image",
-            thumbnail: ogImage,
-            preview_url: ogImage,
-            full_url: ogImage,
-            source: "Firecrawl",
-            author: getDomainName(pageUrl),
-            width: 1200, height: 800,
-            title: pageTitle.slice(0, 80),
-            page_url: pageUrl,
-          });
-        }
-      }
-
       if (results.length >= count) break;
     }
 
@@ -400,46 +370,28 @@ async function firecrawlGoogleImages(query: string, count: number): Promise<Medi
   }
 }
 
-/** Firecrawl — targeted extraction from specific free-use editorial sites */
-async function firecrawlEditorialImages(query: string, count: number): Promise<MediaResult[]> {
+// firecrawlEditorialImages removed — editorial sites already covered by
+// serperSiteSearch() and free image providers (Wikimedia, Flickr, Pexels)
+
+// ============================================
+// FIRECRAWL — Video Search (v2 API, no scraping)
+// Uses basic web search — 1 credit per 10 results
+// ============================================
+async function firecrawlGoogleVideos(query: string, count: number, skipBlockFilter = false, excludeTerms: string[] = []): Promise<MediaResult[]> {
   const key = process.env.FIRECRAWL_API_KEY;
   if (!key) return [];
   try {
-    console.log(`[firecrawl-editorial] Searching: "${query}" on editorial sites`);
-
-    const res = await fetchWithTimeout("https://api.firecrawl.dev/v1/search", {
+    const excl = buildExcludeSuffix(excludeTerms);
+    const res = await fetchWithTimeout("https://api.firecrawl.dev/v2/search", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
       },
       body: JSON.stringify({
-        query: `${query} site:commons.wikimedia.org OR site:flickr.com OR site:apnews.com photo`,
+        query: `${query} video site:youtube.com OR site:vimeo.com${excl}`,
         limit: count + 3,
-        scrapeOptions: {
-          formats: ["extract"],
-          extract: {
-            schema: {
-              type: "object",
-              properties: {
-                images: {
-                  type: "array",
-                  items: {
-                    type: "object",
-                    properties: {
-                      url: { type: "string", description: "Direct URL to image file" },
-                      alt: { type: "string", description: "Caption or alt text" },
-                      credit: { type: "string", description: "Photographer credit" },
-                    },
-                    required: ["url"],
-                  },
-                },
-              },
-              required: ["images"],
-            },
-            prompt: "Extract all photograph URLs from this page. Look for the highest resolution version of each image. Include img src URLs ending in .jpg, .jpeg, .png, .webp. Skip icons, logos, and UI elements.",
-          },
-        },
+        sources: ["web"],
       }),
     }, 12000);
 
@@ -447,70 +399,15 @@ async function firecrawlEditorialImages(query: string, count: number): Promise<M
     const data = await res.json();
     const results: MediaResult[] = [];
 
-    for (const result of data.data || []) {
-      const pageUrl = result.url || "";
-      const pageTitle = result.title || "";
-      for (const img of result.extract?.images || []) {
-        if (img.url?.startsWith("http") && isValidImageUrl(img.url) && !isBlockedDomain(img.url)) {
-          results.push({
-            id: `fc-ed-${results.length}-${Date.now()}`,
-            type: "image",
-            thumbnail: img.url,
-            preview_url: img.url,
-            full_url: img.url,
-            source: "Firecrawl Editorial",
-            author: img.credit || getDomainName(pageUrl),
-            width: 1200, height: 800,
-            title: img.alt || pageTitle.slice(0, 80),
-            page_url: pageUrl,
-          });
-        }
-        if (results.length >= count) break;
-      }
-      if (results.length >= count) break;
-    }
-
-    console.log(`[firecrawl-editorial] "${query}" → ${results.length} editorial images`);
-    return results;
-  } catch (err) {
-    console.error("[firecrawl-editorial] Error:", err instanceof Error ? err.message : err);
-    return [];
-  }
-}
-
-// ============================================
-// FIRECRAWL — Google Video Search
-// ============================================
-async function firecrawlGoogleVideos(query: string, count: number): Promise<MediaResult[]> {
-  const key = process.env.FIRECRAWL_API_KEY;
-  if (!key) return [];
-  try {
-    const res = await fetchWithTimeout("https://api.firecrawl.dev/v1/search", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
-      },
-      body: JSON.stringify({
-        query: `${query} video footage`,
-        limit: count + 3,
-      }),
-    }, 12000);
-
-    if (!res.ok) return [];
-    const data = await res.json();
-    const results: MediaResult[] = [];
-
-    for (const result of data.data || []) {
+    for (const result of data.data?.web || []) {
       const url = result.url || "";
       const title = result.title || "";
-      const thumbnail = result.metadata?.ogImage || result.metadata?.image || "";
 
-      if ((url.includes("youtube.com/watch") || url.includes("youtu.be") || url.includes("vimeo.com")) && !isBlockedDomain(url)) {
+      if ((url.includes("youtube.com/watch") || url.includes("youtu.be") || url.includes("vimeo.com")) && (skipBlockFilter || !isBlockedDomain(url))) {
         results.push({
           id: `fc-vid-${results.length}-${Date.now()}`,
           type: "video",
-          thumbnail,
+          thumbnail: "",
           preview_url: url,
           full_url: url,
           source: "Firecrawl",
@@ -595,6 +492,11 @@ function detectContentCategory(query: string): string {
 export type SearchOptions = {
   imageQuery: string;
   videoQuery?: string;
+  /** Broader subject-level query used only for editorial archives (Imago/Imagn).
+   * Those providers index subjects like "NFL Draft 2025", not visual moments
+   * like "countdown board" — so we pass a broader query to avoid 0-result
+   * searches when the primary image_query is narrow. */
+  editorialQuery?: string;
   imageCount?: number;
   videoCount?: number;
   contentAge?: ContentAge;
@@ -605,6 +507,16 @@ export type SearchOptions = {
   includeFree?: boolean;
   /** Category for licensed providers (e.g. "sport", "entertainment", "news", "creative") */
   licensedCategory?: string;
+  /** When true, skip blocked-domain filtering to include results from all sources regardless of licensing */
+  allowNonLicensed?: boolean;
+  /** Canonical entities the segment is about — used for relevance scoring. */
+  searchEntities?: string[];
+  /** Negative keywords injected into Serper/Firecrawl queries and used to penalize titles. */
+  excludeTerms?: string[];
+  /** AI-supplied fallback image queries, used when the primary returns too few relevant results. */
+  alternateImageQueries?: string[];
+  /** AI-supplied fallback video queries. */
+  alternateVideoQueries?: string[];
 };
 
 export type SearchResult = {
@@ -618,6 +530,7 @@ export async function searchMedia(options: SearchOptions): Promise<SearchResult>
   const {
     imageQuery,
     videoQuery,
+    editorialQuery,
     imageCount = 15,
     videoCount = 5,
     contentAge = "any",
@@ -625,31 +538,36 @@ export async function searchMedia(options: SearchOptions): Promise<SearchResult>
     includeLicensed = true,
     includeFree = true,
     licensedCategory,
+    allowNonLicensed = false,
+    searchEntities = [],
+    excludeTerms = [],
+    alternateImageQueries = [],
+    alternateVideoQueries = [],
   } = options;
+  // Imago/Imagn use the broader subject query when the AI supplied one; all
+  // other providers keep the specific image_query.
+  const editorialImgQuery = editorialQuery && editorialQuery.length >= 3 ? editorialQuery : imageQuery;
+
+  // Skip blocked domain checks when non-licensed mode is enabled
+  const skipBlock = allowNonLicensed;
+
+  // Relevance context — threaded through scoreResult() to reward title matches
+  // on canonical entities and penalize results containing negative keywords.
+  const queryContext: QueryContext = {
+    entities: searchEntities,
+    excludeTerms,
+    query: imageQuery,
+  };
 
   // Auto-detect category for licensed providers if not specified
   const detectedCategory = licensedCategory || detectContentCategory(imageQuery);
 
   const hasSerper = !!process.env.SERPER_API_KEY;
   const hasFirecrawl = !!process.env.FIRECRAWL_API_KEY;
-  const hasImago = !!(process.env.IMAGO_EMAIL && process.env.IMAGO_PASSWORD);
-  const hasImagn = !!(process.env.IMAGN_EMAIL && process.env.IMAGN_PASSWORD);
-  const hasAnyFree = !!(
-    process.env.PEXELS_API_KEY ||
-    process.env.UNSPLASH_ACCESS_KEY ||
-    process.env.PIXABAY_API_KEY ||
-    process.env.FLICKR_API_KEY ||
-    true // Wikimedia always works (no key needed)
-  );
-
-  if (!hasSerper && !hasFirecrawl && !hasImago && !hasImagn && !hasAnyFree) {
-    return {
-      images: demoResults(imageQuery, "image", imageCount),
-      videos: includeVideos ? demoResults(videoQuery || imageQuery, "video", videoCount) : [],
-      sources: ["Demo"],
-      is_demo: true,
-    };
-  }
+  // Imago/Imagn are now pure HTTP scrapes — no credentials needed. They're
+  // always available, and fall back to Serper site: search for reliability.
+  const hasImago = true;
+  const hasImagn = true;
 
   const imageSearches: Promise<MediaResult[]>[] = [];
   const videoSearches: Promise<MediaResult[]>[] = [];
@@ -659,7 +577,7 @@ export async function searchMedia(options: SearchOptions): Promise<SearchResult>
   if (includeLicensed) {
     if (hasImago) {
       imageSearches.push(
-        searchImago({ query: imageQuery, category: detectedCategory, count: 5 })
+        searchImago({ query: editorialImgQuery, category: detectedCategory, count: 5 })
           .then((results) => results.map((r) => ({
             id: r.id, type: "image" as const,
             thumbnail: r.thumbnail, preview_url: r.preview_url, full_url: r.full_url,
@@ -672,7 +590,7 @@ export async function searchMedia(options: SearchOptions): Promise<SearchResult>
     }
     if (hasImagn) {
       imageSearches.push(
-        searchImagn({ query: imageQuery, count: 5 })
+        searchImagn({ query: editorialImgQuery, count: 5 })
           .then((results) => results.map((r) => ({
             id: r.id, type: "image" as const,
             thumbnail: r.thumbnail, preview_url: r.preview_url, full_url: r.full_url,
@@ -685,18 +603,29 @@ export async function searchMedia(options: SearchOptions): Promise<SearchResult>
     }
   }
 
-  // ── Tier 2: Google via Serper (5 total) ──
+  // ── Tier 2: Google via Serper (primary + one alternate fan-out) ──
+  // The alternate query widens the net with a different entity scope so we don't
+  // leave the source with too few on-topic results to choose from.
+  const altImage1 = alternateImageQueries[0];
+  const altVideo1 = alternateVideoQueries[0];
+
   if (hasSerper) {
-    imageSearches.push(serperImages(imageQuery, 5, contentAge));
-    imageSearches.push(serperCCImages(imageQuery, 5));
+    imageSearches.push(serperImages(imageQuery, 5, contentAge, skipBlock, excludeTerms));
+    imageSearches.push(serperCCImages(imageQuery, 5, skipBlock, excludeTerms));
+    if (altImage1) {
+      imageSearches.push(serperImages(altImage1, 3, contentAge, skipBlock, excludeTerms));
+    }
     sources.push("Google", "Google CC");
 
     if (includeVideos && videoQuery) {
-      videoSearches.push(serperVideos(videoQuery, 6, contentAge));
+      videoSearches.push(serperVideos(videoQuery, 6, contentAge, skipBlock, excludeTerms));
+      if (altVideo1) videoSearches.push(serperVideos(altVideo1, 3, contentAge, skipBlock, excludeTerms));
     }
   }
 
   // ── Tier 3: Pexels (3 images) ──
+  // Pexels/free providers don't support `-term` negatives, so we rely on
+  // scoring to filter out off-topic results post-hoc.
   if (includeFree) {
     imageSearches.push(
       searchFreeImages({ query: imageQuery, count: 3, perProvider: 3, providers: ["pexels"] })
@@ -708,11 +637,11 @@ export async function searchMedia(options: SearchOptions): Promise<SearchResult>
 
   // ── Tier 4: Firecrawl deep extraction (5) ──
   if (hasFirecrawl) {
-    imageSearches.push(firecrawlGoogleImages(imageQuery, 5));
+    imageSearches.push(firecrawlGoogleImages(imageQuery, 5, skipBlock, excludeTerms));
     sources.push("Firecrawl");
 
     if (includeVideos && videoQuery) {
-      videoSearches.push(firecrawlGoogleVideos(videoQuery, 4));
+      videoSearches.push(firecrawlGoogleVideos(videoQuery, 4, skipBlock, excludeTerms));
     }
   }
 
@@ -730,17 +659,17 @@ export async function searchMedia(options: SearchOptions): Promise<SearchResult>
   console.log(`[media-search] Raw: ${imageResults.length} images, ${videoResults.length} videos`);
   console.log(`[media-search] By source: ${Object.entries(rawCounts).map(([s, c]) => `${s}: ${c}`).join(", ")}`);
 
-  // Deduplicate and score
+  // Deduplicate and score (context-aware — rewards entity matches, penalizes excludes)
   type ScoredResult = MediaResult & { _score: number };
   const dedupedImages: ScoredResult[] = deduplicateResults(imageResults)
-    .map((r) => ({ ...r, _score: scoreResult(r) }))
+    .map((r) => ({ ...r, _score: scoreResult(r, allowNonLicensed, queryContext) }))
     .filter((r) => r._score > -500)
     .sort((a, b) => b._score - a._score);
 
   // ── Balanced selection: 5 per major source, 2 per free provider ──
   const SOURCE_LIMITS: Record<string, number> = {
     Imago: 5, Imagn: 5, Google: 5, "Google CC": 5,
-    Firecrawl: 5, "Firecrawl Editorial": 5, "Google (Free Sites)": 5,
+    Firecrawl: 5, "Google (Free Sites)": 5,
     Pexels: 3,
   };
 
@@ -779,9 +708,14 @@ export async function searchMedia(options: SearchOptions): Promise<SearchResult>
     .slice(0, imageCount)
     .map(({ _score, ...rest }) => rest) as MediaResult[];
 
+  const videoContext: QueryContext = {
+    entities: searchEntities,
+    excludeTerms,
+    query: videoQuery || imageQuery,
+  };
   const uniqueVideos = includeVideos
     ? deduplicateResults(videoResults)
-        .map((r) => ({ ...r, _score: scoreResult(r) }))
+        .map((r) => ({ ...r, _score: scoreResult(r, allowNonLicensed, videoContext) }))
         .filter((r) => r._score > -500)
         .sort((a, b) => b._score - a._score)
         .slice(0, videoCount)

@@ -7,7 +7,7 @@ import { Card, Button, Badge, Spinner, Textarea } from "@/components/ui";
 import {
   Search, Check, X, Upload, Link as LinkIcon, ChevronDown, ChevronUp,
   RefreshCw, Download, ArrowLeft, Image as ImageIcon, FileText, Pencil, Film,
-  ExternalLink,
+  ExternalLink, ShieldOff,
 } from "lucide-react";
 
 type SourcingMode = "slideshow" | "video";
@@ -19,6 +19,13 @@ type Slide = {
   video_query?: string;
   subject: string;
   estimated_duration_sec?: number;
+  // AI-derived relevance context — forwarded to the search API for scoring and
+  // negative-keyword injection. Optional for backward compatibility with older
+  // cached segmentation responses.
+  media_intent?: "portrait" | "action" | "scene" | "event" | "concept";
+  search_entities?: string[];
+  exclude_terms?: string[];
+  alternate_queries?: { image?: string[]; video?: string[] };
 };
 
 type MediaResult = {
@@ -44,6 +51,7 @@ type SlideMedia = {
   selected: MediaResult[];       // Multi-select: 1-3 images
   selectedVideo: MediaResult | null;
   custom: { url: string; name: string } | null;
+  customUrls: string[];          // User-entered image URLs to include in final export
   loading: boolean;              // True while any source is still loading
   searched: boolean;
   sourceStatus: Record<string, SourceStatus>;
@@ -78,6 +86,7 @@ export default function MediaSourcingPage() {
   const [error, setError] = useState("");
   const [editingQuery, setEditingQuery] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [allowNonLicensed, setAllowNonLicensed] = useState(false);
   const uploadRefs = useRef<Record<number, HTMLInputElement | null>>({});
   // Track in-flight search requests per slide. Only the latest request's response
   // is allowed to update state — prevents stale responses from overwriting fresh results.
@@ -86,7 +95,10 @@ export default function MediaSourcingPage() {
   const searchAborters = useRef<Record<number, AbortController>>({});
 
   const wordCount = script.trim() ? script.trim().split(/\s+/).length : 0;
-  const selectedCount = slideMedia.filter((sm) => sm.selected.length > 0 || sm.custom).length;
+  const selectedCount = slideMedia.filter((sm) => sm.selected.length > 0 || sm.custom || sm.customUrls.length > 0).length;
+  // Per-slide draft of the URL input field — keyed by slide id so adding one
+  // URL on slide A doesn't clear the field on slide B.
+  const [urlDrafts, setUrlDrafts] = useState<Record<number, string>>({});
   const allSelected = slides.length > 0 && selectedCount === slides.length;
   const isVideoMode = sourcingMode === "video";
 
@@ -115,6 +127,7 @@ export default function MediaSourcingPage() {
           selected: [],
           selectedVideo: null,
           custom: null,
+          customUrls: [],
           loading: false,
           searched: false,
           sourceStatus: {},
@@ -176,6 +189,18 @@ export default function MediaSourcingPage() {
               slide_id: slideId,
               mode: isVideoMode ? "video" : "slideshow",
               source: src,
+              allow_non_licensed: allowNonLicensed,
+              // Relevance context — only forwarded when the user hasn't typed
+              // a manual override query (i.e. we're using the AI-generated one).
+              search_entities: query ? [] : slide?.search_entities || [],
+              exclude_terms: query ? [] : slide?.exclude_terms || [],
+              alternate_queries: query ? undefined : slide?.alternate_queries,
+              // Subject = the canonical entity this segment is about (e.g.
+              // "NFL Draft 2025"). Editorial archives like Imago/Imagn index
+              // subjects, not visual moments — the route uses this broader
+              // query for those providers to avoid 0-result searches when the
+              // image_query is narrow ("... countdown board").
+              subject: query ? undefined : slide?.subject,
             }),
             signal: aborter.signal,
           });
@@ -263,14 +288,43 @@ export default function MediaSourcingPage() {
     e.target.value = "";
   };
 
+  // Add a user-entered URL to the slide's final export list. Accepts any
+  // http(s) URL — no validation beyond that since the user has already
+  // confirmed the image they want.
+  const addCustomUrl = (slideId: number) => {
+    const raw = (urlDrafts[slideId] || "").trim();
+    if (!raw) return;
+    if (!/^https?:\/\/\S+/i.test(raw)) return; // silently ignore malformed input
+    setSlideMedia((prev) =>
+      prev.map((sm) =>
+        sm.slide_id === slideId && !sm.customUrls.includes(raw)
+          ? { ...sm, customUrls: [...sm.customUrls, raw] }
+          : sm,
+      ),
+    );
+    setUrlDrafts((prev) => ({ ...prev, [slideId]: "" }));
+  };
+
+  const removeCustomUrl = (slideId: number, idx: number) => {
+    setSlideMedia((prev) =>
+      prev.map((sm) =>
+        sm.slide_id === slideId
+          ? { ...sm, customUrls: sm.customUrls.filter((_, i) => i !== idx) }
+          : sm,
+      ),
+    );
+  };
+
   // --- Export ---
   const buildExportLines = () => {
     return slides.map((slide) => {
       const sm = slideMedia.find((m) => m.slide_id === slide.id);
-      // Use page_url (show page with credits) for export, fall back to full_url (CDN)
-      const mediaUrls = sm?.selected?.length
+      // Use page_url (show page with credits) for export, fall back to full_url (CDN).
+      // User-entered customUrls are appended to whichever source was selected.
+      const selectedUrls = sm?.selected?.length
         ? sm.selected.map((s) => s.page_url || s.full_url)
         : sm?.custom?.url ? [sm.custom.url] : [];
+      const mediaUrls = [...selectedUrls, ...(sm?.customUrls || [])];
       const duration = slide.estimated_duration_sec || 0;
       const timeRange = duration > 0 ? ` 0:00 to ${Math.floor(duration / 60)}:${String(duration % 60).padStart(2, "0")}` : "";
       return { text: slide.text, urls: mediaUrls, timeRange };
@@ -304,17 +358,26 @@ export default function MediaSourcingPage() {
         subject: slide.subject,
         image_query: slide.image_query,
         ...(isVideoMode ? { video_query: slide.video_query, estimated_duration_sec: slide.estimated_duration_sec } : {}),
-        selected_media: sm?.selected?.length
-          ? sm.selected.map((s) => ({
-              url: s.full_url,
-              page_url: s.page_url || s.full_url,
-              source: s.source,
-              author: s.author,
-              title: s.title,
-            }))
-          : sm?.custom
-          ? [{ url: sm.custom.url, page_url: sm.custom.url, source: "Custom", author: "User upload" }]
-          : [],
+        selected_media: [
+          ...(sm?.selected?.length
+            ? sm.selected.map((s) => ({
+                url: s.full_url,
+                page_url: s.page_url || s.full_url,
+                source: s.source,
+                author: s.author,
+                title: s.title,
+              }))
+            : sm?.custom
+              ? [{ url: sm.custom.url, page_url: sm.custom.url, source: "Custom", author: "User upload" }]
+              : []),
+          // User-entered URLs — always appended, alongside whichever selection is active
+          ...(sm?.customUrls || []).map((u) => ({
+            url: u,
+            page_url: u,
+            source: "Custom URL",
+            author: "User provided",
+          })),
+        ],
       };
     });
     triggerDownload(new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" }), `media-sourcing-${Date.now()}.json`);
@@ -412,9 +475,27 @@ export default function MediaSourcingPage() {
                   )}
                   {script && <Button variant="secondary" onClick={() => setScript("")}>Clear</Button>}
                 </div>
-                <Button disabled={script.trim().length <= 10} onClick={processScript}>
-                  <FileText size={15} /> Process {isVideoMode ? "script" : "article"}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setAllowNonLicensed(!allowNonLicensed)}
+                    className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm font-semibold transition-colors border ${
+                      allowNonLicensed
+                        ? "bg-amber-50 text-amber-700 border-amber-200"
+                        : "bg-white text-gray-500 border-gray-200 hover:bg-gray-50"
+                    }`}
+                    title={
+                      allowNonLicensed
+                        ? "Unrestricted search active. Stock agencies (Getty, Shutterstock) are included."
+                        : "Strict licensing active. Stock agencies are filtered out."
+                    }
+                  >
+                    <ShieldOff size={15} className={allowNonLicensed ? "text-amber-500" : "text-gray-400"} />
+                    Non-Licensed
+                  </button>
+                  <Button disabled={script.trim().length <= 10} onClick={processScript}>
+                    <FileText size={15} /> Process {isVideoMode ? "script" : "article"}
+                  </Button>
+                </div>
               </div>
             </Card>
           </div>
@@ -768,8 +849,8 @@ export default function MediaSourcingPage() {
                         </>
                       )}
 
-                      {/* Upload / clear */}
-                      <div className="flex items-center gap-2 pt-2 border-t border-gray-100 mt-2">
+                      {/* Upload / URL input / clear */}
+                      <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-100 mt-2">
                         <input
                           ref={(el) => { uploadRefs.current[slide.id] = el; }}
                           type="file" accept="image/*" className="hidden"
@@ -778,6 +859,20 @@ export default function MediaSourcingPage() {
                         <Button variant="secondary" onClick={() => uploadRefs.current[slide.id]?.click()}>
                           <Upload size={13} /> Upload
                         </Button>
+                        {/* Paste an image URL to include in the final output */}
+                        <div className="flex items-center gap-1 flex-1 min-w-[200px]">
+                          <input
+                            type="url"
+                            placeholder="Paste image URL to include"
+                            value={urlDrafts[slide.id] || ""}
+                            onChange={(e) => setUrlDrafts((p) => ({ ...p, [slide.id]: e.target.value }))}
+                            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addCustomUrl(slide.id); } }}
+                            className="flex-1 text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                          />
+                          <Button variant="secondary" onClick={() => addCustomUrl(slide.id)}>
+                            <LinkIcon size={13} /> Add URL
+                          </Button>
+                        </div>
                         {hasSelection && (
                           <button
                             onClick={() => setSlideMedia((prev) =>
@@ -792,6 +887,27 @@ export default function MediaSourcingPage() {
                           </span>
                         )}
                       </div>
+
+                      {/* Added custom URLs — chips with delete */}
+                      {sm.customUrls.length > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mt-2">
+                          {sm.customUrls.map((u, idx) => (
+                            <span
+                              key={idx}
+                              className="inline-flex items-center gap-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 text-xs rounded px-2 py-1 max-w-full"
+                              title={u}
+                            >
+                              <LinkIcon size={11} />
+                              <span className="truncate max-w-[240px]">{u}</span>
+                              <button
+                                onClick={() => removeCustomUrl(slide.id, idx)}
+                                className="text-indigo-400 hover:text-red-500"
+                                aria-label="Remove URL"
+                              ><X size={11} /></button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                 </Card>

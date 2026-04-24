@@ -7,9 +7,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { searchImago, type ImagoSearchOptions } from "@/lib/imago-provider";
 import { searchImagn, type ImagnSearchOptions } from "@/lib/imagn-provider";
-import { isLoggedIn } from "@/lib/playwright-browser";
 
-export const maxDuration = 60; // Allow up to 60s for browser-based search
+// Providers are now pure HTTP — no browser, no login — so a short budget
+// is fine. The tier-1 direct scrape + tier-2 Serper fallback complete in ~1-2s.
+export const maxDuration = 15;
 
 /** Auto-detect content category from query */
 function detectCategory(query: string): string {
@@ -53,17 +54,11 @@ function toMediaResult(
   };
 }
 
-/** GET — Session status check */
+/** GET — Provider status. Both are public-scrape providers now, so always ready. */
 export async function GET() {
   return NextResponse.json({
-    imago: {
-      configured: !!(process.env.IMAGO_EMAIL && process.env.IMAGO_PASSWORD),
-      logged_in: isLoggedIn("imago"),
-    },
-    imagn: {
-      configured: !!(process.env.IMAGN_EMAIL && process.env.IMAGN_PASSWORD),
-      logged_in: isLoggedIn("imagn"),
-    },
+    imago: { configured: true, logged_in: true },
+    imagn: { configured: true, logged_in: true },
   });
 }
 
@@ -89,8 +84,8 @@ export async function POST(req: NextRequest) {
     const searches: Promise<MediaResult[]>[] = [];
     const sources: string[] = [];
 
-    // Imago search
-    if (providers.includes("imago") && process.env.IMAGO_EMAIL && process.env.IMAGO_PASSWORD) {
+    // Imago search — no credentials needed (public scrape + Serper fallback)
+    if (providers.includes("imago")) {
       const imagoOpts: ImagoSearchOptions = {
         query,
         category: category || detectCategory(query),
@@ -110,8 +105,8 @@ export async function POST(req: NextRequest) {
       sources.push("Imago");
     }
 
-    // Imagn search
-    if (providers.includes("imagn") && process.env.IMAGN_EMAIL && process.env.IMAGN_PASSWORD) {
+    // Imagn search — no credentials needed (public scrape of simpleSearchAjax)
+    if (providers.includes("imagn")) {
       const imagnOpts: ImagnSearchOptions = {
         query,
         categories: imagn_categories,
@@ -130,11 +125,7 @@ export async function POST(req: NextRequest) {
 
     if (searches.length === 0) {
       return NextResponse.json(
-        {
-          error: "No licensed providers configured. Set IMAGO_EMAIL/IMAGO_PASSWORD and/or IMAGN_EMAIL/IMAGN_PASSWORD in .env.local",
-          images: [],
-          sources: [],
-        },
+        { error: "No providers selected", images: [], sources: [] },
         { status: 200 }
       );
     }

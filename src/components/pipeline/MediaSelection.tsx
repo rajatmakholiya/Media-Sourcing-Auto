@@ -415,11 +415,13 @@ function VideoPreviewModal({
 export default function MediaSelection({
   segments,
   voiceover,
+  allowNonLicensed,
   onComplete,
   onBack,
 }: {
   segments: SegmentationResult;
   voiceover: VoiceoverData;
+  allowNonLicensed: boolean;
   onComplete: (data: MediaSelectionData) => void;
   onBack: () => void;
 }) {
@@ -485,6 +487,17 @@ export default function MediaSelection({
             segment_id: segId,
             content_age: contentAge,
             sources: enabledSources,
+            allow_non_licensed: allowNonLicensed,
+            // AI-derived relevance context — forwarded only when the user hasn't typed
+            // a manual override. Entities boost on-topic title matches; exclude_terms
+            // inject `-term` negatives into Serper/Firecrawl and penalize titles that
+            // match them. Alternate queries fan out for more coverage.
+            search_entities: overrideQuery ? [] : seg?.search_entities || [],
+            exclude_terms: overrideQuery ? [] : seg?.exclude_terms || [],
+            alternate_queries: overrideQuery ? undefined : seg?.alternate_queries,
+            // Broader subject for editorial archives (Imago/Imagn), which index
+            // subjects not visual moments. Ignored by Google/Firecrawl.
+            subject: overrideQuery ? undefined : seg?.subject,
           }),
         });
         clearTimeout(timeout);
@@ -506,7 +519,7 @@ export default function MediaSelection({
         );
       }
     },
-    [segments, contentAge, enabledSources]
+    [segments, contentAge, enabledSources, allowNonLicensed]
   );
 
   const searchAll = useCallback(async () => {
@@ -716,6 +729,7 @@ export default function MediaSelection({
           {isDemo && <Badge variant="fallback">Demo mode — add API keys for real results</Badge>}
         </div>
         <div className="flex items-center gap-2">
+
           <Button
             variant={showFilters ? "primary" : "secondary"}
             onClick={() => setShowFilters(!showFilters)}
